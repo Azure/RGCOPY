@@ -1,14 +1,22 @@
-# Project
+# RGCOPY
+RGCOPY is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). This tool has been developed for copying an SAP test landscape consisting of many servers within a single Azure resource group. RGCOPY is based on Azure Resource Manager (ARM).
 
-> This repo has been populated by an initial template to help get you started. Please
-> make sure to update the content to build a great experience for community-building.
+The main features of RGCOPY are:
+- RGCOPY is a PowerShell script which has been tested on **Windows** and **Linux**. It should run on **MacOS**, too.
+- Copy between different Regions, Subscriptions and Tenants.
+- Changing resource properties like VM size, disk SKU, disk performance tier, disk caching, Write Accelerator, Accelerated Networking, Availability Zone.
+- Add, remove and change Proximity Placement Groups Availability Sets and Availability Zones.
+- Support for the most important Azure resources (for SAP), like virtual machines, managed disks, NetApp volumes (on LINUX) and Load Balancers.
+- Converting disks to NetApp volumes and vice versa (on LINUX).
+- Converting Ultra SSD disks to Premium SSD disks and vice versa (on LINUX).
+- Merging VMs from one resource group into another. Cloning a VM inside a resource group.
+- VMs with just one data disk can be copied even while they are running.
 
-As the maintainer of this project, please make a few updates:
+!["RGCOPY"](/images/RGCOPY.png)
 
-- Improving this README.MD file to provide a great experience
-- Updating SUPPORT.MD with content about this project's support experience
-- Understanding the security reporting process in SECURITY.MD
-- Remove this section from the README
+## Documentation
+
+The documention for RGCOPY is  located in [rgcopy-docu.md](./rgcopy-docu.md)
 
 ## Contributing
 
