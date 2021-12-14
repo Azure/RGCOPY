@@ -2,9 +2,11 @@
 ***
 version 0.9.26<BR>December 2021
 ***
-RGCOPY is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). This tool has been developed for copying an SAP test landscape consisting of many servers within a single Azure resource group. RGCOPY is based on Azure Resource Manager (ARM).
+RGCOPY is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). This tool has been developed for copying an SAP **test** landscape consisting of many servers within a single Azure resource group. 
 
-The main features of RGCOPY are:
+> RGCOPY is **not** an SAP deployment tool. It simply clones the VMs. It does not change anything inside the VMs like changing the name on OS level or applying license keys.
+
+RGCOPY is based on Azure Resource Manager (ARM). The main features of RGCOPY are:
 - RGCOPY is a PowerShell script which has been tested on **Windows** and **Linux**. It should run on **MacOS**, too.
 - Copy between different Regions, Subscriptions and Tenants.
 - Changing resource properties like VM size, disk SKU, disk performance tier, disk caching, Write Accelerator, Accelerated Networking, Availability Zone.
