@@ -20,8 +20,10 @@ The most important feature of RGCOPY is deploying an ARM template. This might fa
 #### Analyze custom script errors
 
 RGCOPY allows you running your own scripts inside the VMs. Failures of these scripts are not the responsibility of RGCOPY.
-For running these scripts, RGCOPY uses the cmdlet `Invoke-AzVMRunCommand`. This cmdlet is communicating with the Azure Agent that is installed inside the VM. If this does not work reliably then you should **update the Azure Agent** (waagent) to the newest version. 
-Any other software component inside the VM could also cause problems with  `Invoke-AzVMRunCommand`. To be on the save side, you should use an OS image from the Azure Marketplace rather than your own custom OS image.
+
+For running these scripts, RGCOPY uses the cmdlet `Invoke-AzVMRunCommand`. This cmdlet is communicating with the Azure Agent that is installed inside the VM. If this does not work reliably then you should **update the Azure Agent** (waagent) to the newest version. Any other software component inside the VM could also cause problems with `Invoke-AzVMRunCommand`. To be on the save side, you should use an OS image from the Azure Marketplace rather than your own custom OS image.
+
+`Invoke-AzVMRunCommand` expects that the script finishes within roughly one hour. If the script takes longer then `Invoke-AzVMRunCommand` (and RGCOPY) terminates with "Long running operation failed". If you want to use longer running scripts then you must write another script that just triggers or schedules your original script. This other script can be started using `Invoke-AzVMRunCommand`.
 
 #### Supported resources
 
