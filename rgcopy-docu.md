@@ -2,20 +2,19 @@
 ***
 version 0.9.26<BR>December 2021
 ***
-RGCOPY is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). This tool has been developed for copying an SAP **test** landscape consisting of many servers within a single Azure resource group. 
+RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group to a new resource group. The target RG might be in a different region, subscription or tenant. RGCOPY has been tested on **Windows**, **Linux** and in **Azure Cloud Shell**. It should run on **MacOS**, too.
 
-> RGCOPY is **not** an SAP deployment tool. It simply clones the VMs. It does not change anything inside the VMs like changing the name on OS level or applying license keys.
+RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it supports the most important Azure resources needed for SAP, as virtual machines, managed disks and Load Balancers. However, you can use RGCOPY also for other workloads.
 
-RGCOPY is based on Azure Resource Manager (ARM). The main features of RGCOPY are:
-- RGCOPY is a PowerShell script which has been tested on **Windows** and **Linux**. It should run on **MacOS**, too.
-- Copy between different Regions, Subscriptions and Tenants.
-- Changing resource properties like VM size, disk SKU, disk performance tier, disk caching, Write Accelerator, Accelerated Networking, Availability Zone.
-- Add, remove and change Proximity Placement Groups Availability Sets and Availability Zones.
-- Support for the most important Azure resources (for SAP), like virtual machines, managed disks, NetApp volumes (on LINUX) and Load Balancers.
-- Converting disks to NetApp volumes and vice versa (on LINUX).
-- Converting Ultra SSD disks to Premium SSD disks and vice versa (on LINUX).
-- Merging VMs from one resource group into another. Cloning a VM inside a resource group.
-- VMs with just one data disk can be copied even while they are running.
+> RGCOPY is not an SAP deployment tool. It simply copies Azure resources (VMs, disks, NICs ...).<BR>It does not change anything inside the VMs like changing the server name on OS level or applying SAP license keys.
+
+RGCOPY can change several resource properties in the target RG:
+- VM size, disk SKU, disk performance tier, disk caching, Write Accelerator, Accelerated Networking
+- Adding, removing and changing Proximity Placement Groups, Availability Sets and Availability Zones.
+- Converting disks to NetApp volumes and vice versa (on Linux VMs).
+- Converting Ultra SSD disks to Premium SSD disks and vice versa (on Linux VMs).
+- Merging single VMs into an existing subnet (target RG already exists)
+- Cloning a VM inside a resource group (target RG = source RG)
 
 !["RGCOPY"](/images/RGCOPY.png)
 
@@ -462,6 +461,8 @@ Ultra SSD disks|Premium SSD disks|skip Ultra SSD disks and create new Premium SS
 Disks|Ultra SSD disks|skip disks and create new Ultra SSD disks
 Ultra SSD disks|Ultra SSD disks|skip Ultra SSD disks and create new Ultra SSD disks
 
+> Unlike other RGCOPY features, NetApp Volumes and Ultra SSD Disks require running code inside the source RG and the target RG. **Therefore, the stability of this feature depends on the OS and other running software inside the VMs.** This feature has been tested with SUSE Linux Enterprise Server and SAP workload. Using this feature is on your own risk. To be on the save side, you should use database backup and restore rather than converting the database disks using RGCOPY.
+
 For the source RG, RGCOPY must know the mount points inside the VMs for all disks and volumes. Hereby, RGCOPY can backup all files that are stored in these mount points to an SMB share in the source RG. In the target RG, new disks or volumes are created for these mount points. After that, RGCOPY restores the files from the SMB share to the mount points in the target RG.
 
 The following requirements must be met in the source RG:
@@ -615,8 +616,6 @@ RGCOPY can start different kind of scripts\* that are not part of RGCOPY. These 
 2. **Remotely running PowerShell scripts** inside a Windows VM<BR>They can either be stored locally (on your PC) or remotely (on the VM that is running the script).<BR>These scripts **must** contain a simple `param` statement (no data type or parameter options).<BR>Parameters of type array are converted to string. See example script `exampleStartAnalysis.ps1`
 3. **Remotely running Shell scripts** inside a LINUX VM<BR>These scripts can either be stored locally (on your PC) or remotely (on the VM that is running the script).<BR>Parameters of type array are converted to string. See example script `exampleStartAnalysis.sh`
 
-> For remotely running scripts, RGCOPY connects to the Azure Agent that is running inside the VM. Make sure that you have installed a **recent version of the Azure Agent**. See also https://docs.microsoft.com/en-US/troubleshoot/azure/virtual-machines/support-extensions-agent-version.
-
 RGCOPY passes the following parameters to the scripts:
 1. All supplied RGCOPY parameters.
 2. Some of the optional RGCOPY parameters, even when not supplied. For example `targetSub`.
@@ -651,6 +650,7 @@ parameter|[DataType]: usage
 **`scriptStartAnalysisPath`**|**[string]**: Runs a script for starting Workload Analysis.<BR><BR>Same details apply here as for parameter `scriptStartSapPath` above.
 **`startWorkload`**|**[switch]**: Enables the last step of RGCOPY: *Workload and Analysis*.<BR><BR>Just using parameters `scriptStartLoadPath` and `scriptStartAnalysisPath` is not sufficient for starting the workload. You must explicitly enable the *Workload and Analysis* step using parameter `startWorkload`. This prevents an unintended start of the workload if Azure tags are used (rather than RGCOPY parameters `scriptStartLoadPath` and `scriptStartAnalysisPath`).
 
+> For remotely running scripts, RGCOPY uses the cmdlet **`Invoke-AzVMRunCommand`** that connects to the Azure Agent running inside the VM. Make sure that you have installed a **recent version of the Azure Agent**. See also https://docs.microsoft.com/en-US/troubleshoot/azure/virtual-machines/support-extensions-agent-version.<BR><BR>`Invoke-AzVMRunCommand` expects that the script finishes within roughly one hour. If the script takes longer then `Invoke-AzVMRunCommand` (and RGCOPY) terminates with "Long running operation failed". If you want to use longer running scripts then you must write a wrapper script that just triggers or schedules your original script. The wrapper script can then be started using RGCOPY.
 
 ### Starting SAP
 For starting SAP, you must write your own script. This script must contain `systemctl start sapinit` if you are using NetApp volumes. The path of the script has to be specified using parameter `scriptStartSapPath` (see above). This script will be started by RGCOPY in the following cases:
