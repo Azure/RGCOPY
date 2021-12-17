@@ -5941,6 +5941,7 @@ function new-greenlist {
 	add-greenlist 'Microsoft.HanaOnAzure/sapMonitors/providerInstances' '*'
 	add-greenlist 'Microsoft.HanaOnAzure/sapMonitors' '*'
 
+	add-greenlist 'Microsoft.Compute/snapshots' '*'
 	add-greenlist 'Microsoft.Compute/virtualMachines'
 	add-greenlist 'Microsoft.Compute/virtualMachines' 'additionalCapabilities'
 	add-greenlist 'Microsoft.Compute/virtualMachines' 'additionalCapabilities' 'ultraSSDEnabled'
