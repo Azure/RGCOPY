@@ -1,20 +1,33 @@
 # RGCOPY documentation
+**Version: 0.9.28<BR>January 2022**
 ***
-version 0.9.26<BR>December 2021
-***
+
 RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group to a new resource group. The target RG might be in a different region, subscription or tenant. RGCOPY has been tested on **Windows**, **Linux** and in **Azure Cloud Shell**. It should run on **MacOS**, too.
 
 RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it supports the most important Azure resources needed for SAP, as virtual machines, managed disks and Load Balancers. However, you can use RGCOPY also for other workloads.
 
-> RGCOPY is not an SAP deployment tool. It simply copies Azure resources (VMs, disks, NICs ...).<BR>It does not change anything inside the VMs like changing the server name on OS level or applying SAP license keys.
+> RGCOPY is not an SAP deployment tool. It simply copies Azure resources (VMs, disks, NICs ...). It does not change anything inside the VMs like changing the server name at the OS level or applying SAP license keys.
 
 RGCOPY can change several resource properties in the target RG:
 - VM size, disk SKU, disk performance tier, disk caching, Write Accelerator, Accelerated Networking
-- Adding, removing and changing Proximity Placement Groups, Availability Sets and Availability Zones.
+- Adding, removing, and changing Proximity Placement Groups, Availability Sets, and Availability Zones.
 - Converting disks to NetApp volumes and vice versa (on Linux VMs).
 - Converting Ultra SSD disks to Premium SSD disks and vice versa (on Linux VMs).
 - Merging single VMs into an existing subnet (target RG already exists)
 - Cloning a VM inside a resource group (target RG = source RG)
+
+For example:
+
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'contoso_source_rg'
+    targetRG        = 'contoso_target_rg'
+    targetLocation  = 'eastus'
+    setVmSize       = 'Standard_E32s_v3'
+    setDiskSku      = 'Premium_LRS'
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
 
 !["RGCOPY"](/images/RGCOPY.png)
 
@@ -88,6 +101,17 @@ $rgcopyParameter = @{
 .\rgcopy.ps1 @rgcopyParameter
 ```
 
+You can even run RGCOPY without any parameter. In this case, you are prompted for the mandatory parameters
+```powershell
+.\rgcopy.ps1
+```
+
+```powershell
+cmdlet rgcopy.ps1 at command pipeline position 1
+Supply values for the following parameters:
+sourceRG:
+```
+
 ***
 ## Supported Azure Resources
 RGCOPY uses a list of well-known resources and properties. **All other resources in the source Resource RG are skipped and not copied to the target RG**. This feature was introduced to avoid RGCOPY issues caused by future resource properties.
@@ -151,9 +175,21 @@ In the unlikely case that database files are distributed over the data disk (or 
 
 ### Changes in the source RG
 - RGCOPY creates snapshots of all disks in the source RG with the name **\<diskname>.rgcopy**.
+- if BLOB copy is used, then RGCOPY grants access to the snapshots at the beginning and revokes this access at the end of the BLOB copy.
 - If RGCOPY parameter `snapshotVolumes` is supplied, then snapshots of NetApp volumes with the name **rgcopy** are created.
 - If RGCOPY parameter `createVolumes` or `createDisks` is supplied, then a **storage account** with a premium SMB share is created in the source RG. **All VMs are started in the source RG**. In configured VMs, the SMB share **/mnt/rgcopy** is mounted, the service **sapinit** is stopped and process **hdbrsutil** is killed.
 - If RGCOPY parameter `pathPreSnapshotScript` is supplied, then the specified PowerShell script is executed before creating the snapshots. In this case, all VMs are started, SAP is started, the PowerShell script (located on the local PC) is executed and finally **all VMs are stopped in the source RG**
+
+### Multiple instances of RGCOPY
+It is not allowed, running multiple instances of RGCOPY at the *same* time for deploying/changing the *same* target RG. However, running multiple instances of RGCOPY using the same source RG is possible with the following restrictions:
+1. each parallel running RGCOPY instance must have its own working directory. This can be forced by setting a different value for parameter `pathExportFolder` for each RGCOPY instance.
+2. The source RG must not be changed. Therefore:
+    - snapshots must not be created (use parameter `skipSnapshots`)
+    - the following parameters are *not* allowed: `snapshotVolumes`, `createVolumes`, `createDisks`, and `pathPreSnapshotScript`
+    - only one of the parallel running RGCOPY instances uses BLOB copy (source RG and target RG are in different regions). When starting a BLOB copy while another BLOB copy from the same source RG is still running, then the first BLOB copy fails.
+
+RGCOPY does not double check whether another instance of RGCOPY is running. When running multiple instances of RGCOPY in parallel, you must take care of the restrictions on your own.
+
 
 ### Created files
 RGCOPY creates the following files in the user home directory (or in the directory which has been set using RGCOPY parameter `pathExportFolder`) on the PC where RGCOPY is running:
@@ -622,9 +658,10 @@ RGCOPY passes the following parameters to the scripts:
 3. All ARM template parameters that are generated by RGCOPY.
 4. Parameter `sourceLocation` that contains the region of the source RG
 5. Parameter `vmName` that contains the name of the VM that is running the script.
-6. Parameter `rgcopyParameters` that contains the names of all passed parameters.
+6. Parameters `vmSize<vmName>`, `vmCpus<vmName>`, `vmMemGb<vmName>` that contain Azure VM size configuration for all deployed VMs.
+7. Parameter `rgcopyParameters` that contains the names of all passed parameters.
 
-In all scripts you can simply access the passed parameters using variables, for example `$targetSub`. Only remotely running PowerShell scripts must contain a `param` clause.
+In all scripts you can simply access the passed parameters using variables, for example `$targetSub`. Only *remotely* running *PowerShell* scripts must contain a `param` clause.
 
 RGCOPY terminates with an error message if the output of the script contains the text `++ exit 1`. Be aware that `Invoke-AzVMRunCommand` does only return the last few dozen lines of `stdout` and `stderr`.
 
@@ -649,6 +686,8 @@ parameter|[DataType]: usage
 **`scriptStartLoadPath`**|**[string]**: Runs a script for starting SAP Workload (SAP benchmark).<BR><BR>Same details apply here as for parameter `scriptStartSapPath` above.
 **`scriptStartAnalysisPath`**|**[string]**: Runs a script for starting Workload Analysis.<BR><BR>Same details apply here as for parameter `scriptStartSapPath` above.
 **`startWorkload`**|**[switch]**: Enables the last step of RGCOPY: *Workload and Analysis*.<BR><BR>Just using parameters `scriptStartLoadPath` and `scriptStartAnalysisPath` is not sufficient for starting the workload. You must explicitly enable the *Workload and Analysis* step using parameter `startWorkload`. This prevents an unintended start of the workload if Azure tags are used (rather than RGCOPY parameters `scriptStartLoadPath` and `scriptStartAnalysisPath`).
+**`vmStartWaitSec`**|**[int]**: Wait time in seconds, default value: `5 * 60`<BR>After starting the VMs, RGCOPY waits 5 minutes before trying to start a remote script. This delay might be needed for starting all services (for example, SSH service) inside the VM.
+**`vmAgentWaitMinutes`** |**[int]**: Maximum wait time in minutes, default value: `30`<BR>Before running Invoke-AzVMRunCommand, RGCOPY waits until the Azure Agent status is 'Ready'. The maximum wait time is 30 minutes by default.
 
 > For remotely running scripts, RGCOPY uses the cmdlet **`Invoke-AzVMRunCommand`** that connects to the Azure Agent running inside the VM. Make sure that you have installed a **recent version of the Azure Agent**. See also https://docs.microsoft.com/en-US/troubleshoot/azure/virtual-machines/support-extensions-agent-version.<BR><BR>`Invoke-AzVMRunCommand` expects that the script finishes within roughly one hour. If the script takes longer then `Invoke-AzVMRunCommand` (and RGCOPY) terminates with "Long running operation failed". If you want to use longer running scripts then you must write a wrapper script that just triggers or schedules your original script. The wrapper script can then be started using RGCOPY.
 

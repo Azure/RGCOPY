@@ -3,17 +3,30 @@ RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies the most importan
 
 RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it supports the most important Azure resources needed for SAP, as virtual machines, managed disks and Load Balancers. However, you can use RGCOPY also for other workloads.
 
-> RGCOPY is not an SAP deployment tool. It simply copies Azure resources (VMs, disks, NICs ...).<BR>It does not change anything inside the VMs like changing the server name on OS level or applying SAP license keys.
+> RGCOPY is not an SAP deployment tool. It simply copies Azure resources (VMs, disks, NICs ...). It does not change anything inside the VMs like changing the server name at the OS level or applying SAP license keys.
 
 RGCOPY can change several resource properties in the target RG:
 - VM size, disk SKU, disk performance tier, disk caching, Write Accelerator, Accelerated Networking
-- Adding, removing and changing Proximity Placement Groups, Availability Sets and Availability Zones.
+- Adding, removing, and changing Proximity Placement Groups, Availability Sets, and Availability Zones.
 - Converting disks to NetApp volumes and vice versa (on Linux VMs).
 - Converting Ultra SSD disks to Premium SSD disks and vice versa (on Linux VMs).
 - Merging single VMs into an existing subnet (target RG already exists)
 - Cloning a VM inside a resource group (target RG = source RG)
 
-The full documention for RGCOPY is located in [rgcopy-docu.md](./rgcopy-docu.md)
+**The documention for RGCOPY is located in [rgcopy-docu.md](./rgcopy-docu.md)**
+
+Here is just a simple example:
+
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'contoso_source_rg'
+    targetRG        = 'contoso_target_rg'
+    targetLocation  = 'eastus'
+    setVmSize       = 'Standard_E32s_v3'
+    setDiskSku      = 'Premium_LRS'
+}
+.\rgcopy.
+```
 
 !["RGCOPY"](/images/RGCOPY.png)
 
