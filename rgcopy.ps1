@@ -3245,7 +3245,7 @@ function update-paramSetVmZone {
 	while ($Null -ne $script:paramConfig) {
 
 		$vmZone = $script:paramConfig
-		test-values 'setVmZone' $setVmZone @('0','1','2','3')
+		test-values 'setVmZone' $vmZone @('0','1','2','3') 'zone'
 
 		$zoneName = $VmZone
 		if ($zoneName -eq '0') { $zoneName = '0 (no zone configured)' }
