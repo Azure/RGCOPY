@@ -1,6 +1,6 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.30
+version:          0.9.32
 version date:     March 2022
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
@@ -34,6 +34,7 @@ param (
 	,[Parameter(Mandatory=$False,ParameterSetName='updateMode')]
 	 [Parameter(Mandatory=$True, ParameterSetName='copyMode')]
 	 [string] $targetRG										# Target Resource Group (will be created)
+	,[switch] $allowExistingDisks							# do not check whether the targetRG already contains disks
 
 	# parameter is mandatory, dependent on used Parameter Set
 	,[Parameter(Mandatory=$False,ParameterSetName='updateMode')]
@@ -72,6 +73,8 @@ param (
 	,[switch] $deleteSnapshots								# delete snapshots after deployment
 	,[switch] $deleteSourceSA								# delete storage account in the source RG after deployment
 	,[switch] $deleteTargetSA								# delete storage account in the target RG after deployment
+	# simulating
+	,[switch] $simulate										# just create ARM template
 
 	# BLOB switches
 	,[switch] $useBlobs										# always (even in same region) copy snapshots to BLOB
@@ -94,11 +97,12 @@ param (
 	# used Parameter Set is 'updateMode' when switch updateMode is set
 	,[Parameter(ParameterSetName='updateMode')]
 	 [switch] $updateMode									# change properties in source RG
-	,[switch] $skipUpdate									# just simulate Updates
+	# ,[switch] $simulate									# just simulate Updates
 	# ,[switch] $stopVMsSourceRG 							# parameter also available in Copy Mode, see above
 	# ,$setVmSize	= @()									# parameter also available in Copy Mode, see below
 	# ,$setDiskSize = @()									# parameter also available in Copy Mode, see below
 	# ,$setDiskTier = @()									# parameter also available in Copy Mode, see below
+	# ,$setDiskBursting = @()								# parameter also available in Copy Mode, see below
 	# ,$setDiskCaching = @()								# parameter also available in Copy Mode, see below
 	# ,$setDiskSku = @()									# parameter also available in Copy Mode, see below
 	# ,$setAcceleratedNetworking = @()						# parameter also available in Copy Mode, see below
@@ -165,8 +169,7 @@ param (
 	,[string] $jumpboxName		= ''						# create FQDN for public IP of jumpbox
 	,[switch] $ignoreTags									# ignore rgcopy*-tags for target RG CONFIGURATION
 	,[switch] $copyDetachedDisks							# copy disks that are not attached to any VM
-	,[switch] $skipVmChecks									# do not double check whether VMs can be deployed in target region
-	,[switch] $skipDiskChecks								# do not check whether the targetRG already contains disks
+
 
 	#--------------------------------------------------------------
 	# skip resources from sourceRG
@@ -183,6 +186,10 @@ param (
 	#--------------------------------------------------------------
 	# resource configuration parameters
 	#--------------------------------------------------------------
+	,[switch] $skipVmChecks									# do not double check whether VMs can be deployed in target region
+	,[switch] $forceVmChecks								# Do not automatically change resource properties to valid values
+	,[switch] $skipDefaultValues							# Do not use resource configuration Default Values in COPY MODE
+	
 	<#  parameter for changing multiple resources:
 			[array] $parameter = @($rule1,$rule2, ...)
 				with [string] $rule = "$configuration@$resourceName1,$resourceName2, ..."
@@ -208,6 +215,14 @@ param (
 	#  with $tier -in ('P1', 'P2', ...)    P0 for remove tier
 	# set tier of single disk to P40:					@("P40/hana1data1")
 
+	,$setDiskBursting = @()
+	# usage: $setDiskBursting = @("$bursting@$disk1,$disk1...", ...)
+	#  with $bursting -in ('True','False')
+
+	,$setDiskMaxShares= @()
+	# usage: $setDiskMaxShares = @("$maxShares@$disk1,$disk1...", ...)
+	#  with $maxShares -in (1,2,3,...)
+
 	,$setDiskCaching = @()
 	# usage: $setDiskCaching = @("$caching/$writeAccelerator@$disk1,$disk1...", ...)
 	#  with $caching -in @('ReadOnly','ReadWrite','None')
@@ -217,11 +232,11 @@ param (
 	# set caching for 2 disks:							@("ReadOnly/True@hana1data1", "None/False@hana1os",)
 	# turn on WA for one disk and off for all others: 	@("ReadOnly/True@hana1data1", "None/False")
 
-	,$setDiskSku = @('Premium_LRS')
+	,$setDiskSku = 'Premium_LRS'				# default value in COPY MODE
 	# usage: $setDiskSku = @("$sku@$disk1,$disk1,...", ...)
-	#  with $sku -in ('Premium_LRS','StandardSSD_LRS','Standard_LRS')
+	#  with $sku -in ('Premium_LRS','StandardSSD_LRS','Standard_LRS','Premium_ZRS','StandardSSD_ZRS')
 
-	,$setVmZone	= @('0')
+	,$setVmZone	= 0								# default value in COPY MODE
 	# usage: $setVmZone = @("$zone@$vm1,$vm2,...", ...)
 	#  with $zone -in (0,1,2,3)
 	#  0 means: remove zone
@@ -276,28 +291,28 @@ param (
 	#	with $net as virtual network name, $subnet as subnet name in target resource group
 	# merge VM jumpbox into target RG:					@("vnet/default@jumpbox")
 
-	,$setLoadBalancerSku = @('Standard')
+	,$setLoadBalancerSku = 'Standard'				# default value in COPY MODE
 	# usage: $setLoadBalancerSku = @("$sku@$loadBalancer1,$loadBalancer12,...", ...)
 	#	with $sku -in @('Basic', 'Standard')
 
-	,$setPublicIpSku = @('Standard')
+	,$setPublicIpSku = @()
 	#usage: $setPublicIpSku = @("$sku@$ipName1,$ipName12,...", ...)
 	#	with $sku -in @('Basic', 'Standard')
 
-	,$setPublicIpAlloc = @('Static')
+	,$setPublicIpAlloc = @()
 	# usage: $setPublicIpAlloc = @("$allocation@$ipName1,$ipName12,...", ...)
 	#	with $allocation -in @('Dynamic', 'Static')
 
-	,$setPrivateIpAlloc	= @('Static')
+	,$setPrivateIpAlloc	= 'Static'					# default value in COPY MODE
 	# usage: $setPrivateIpAlloc = @("$allocation@$ipName1,$ipName12,...", ...)
 	#	with $allocation -in @('Dynamic', 'Static')
 
-	,$removeFQDN = $True
+	,$removeFQDN = $True							# this default value is ALWAYS used
 	# removes Full Qualified Domain Name from public IP address
 	# usage: $removeFQDN = @("bool@$ipName1,$ipName12,...", ...)
 	#	with $bool -in @('True')
 
-	,$setAcceleratedNetworking = $True
+	,$setAcceleratedNetworking = $True				# default value in COPY MODE
 	# usage: $setAcceleratedNetworking = @("$bool@$nic1,$nic2,...", ...)
 	#	with $bool -in @('True', 'False')
 
@@ -352,27 +367,70 @@ else					{ $ErrorActionPreference = 'Stop' }
 
 $boundParameterNames = $PSBoundParameters.keys
 
-# process only sourceRG ?
-if (($updateMode      -eq $True) `
--or ($justCreateSnapshots -eq $True) `
--or ($justDeleteSnapshots -eq $True) `
--or ($justRedeployAms     -eq $True)) {
-	
-	$targetRG = $sourceRG
-	$enableSourceRgMode = $True
-}
-else {
-	$enableSourceRgMode = $False
-}
+$variableTypeParameters = @(
+	'snapshotVolumes',
+	'createVolumes',
+	'createDisks',
+	'setVmDeploymentOrder',
+	'setVmTipGroup',
+	'setVmName',
+	'setVmMerge',
+	'setVmSize',
+	'setVmZone',
+	'setDiskSku',
+	'setDiskSize',
+	'setDiskMaxShares',
+	'setDiskTier',
+	'setDiskBursting',
+	'setDiskCaching',
+	'setAcceleratedNetworking',
+	'setLoadBalancerSku',
+	'setPublicIpSku',
+	'setPublicIpAlloc',
+	'setPrivateIpAlloc',
+	'removeFQDN',
+	'createProximityPlacementGroup',
+	'createAvailabilitySet',
+	'setGroupTipSession'
+)
+
+$workflowParameters = @(
+	'updateMode',
+	'archiveMode',
+	'skipArmTemplate',
+	'skipSnapshots',
+	'stopVMsSourceRG',
+	'skipBackups',
+	'skipBlobs',
+	'skipDeployment',
+	'skipDeploymentVMs',
+	'skipRestore',
+	'stopRestore',
+	'continueRestore',
+	'skipExtensions',
+	'startWorkload',
+	'stopVMsTargetRG',
+	'deleteSnapshots',
+	'deleteSourceSA',
+	'deleteTargetSA',
+	'simulate',
+	'restartBlobs',
+	'justCopyBlobs',
+	'justStopCopyBlobs',
+	'justCreateSnapshots',
+	'justDeleteSnapshots',
+	'justRedeployAms',
+	'skipStartSAP'
+)
 
 # Update Mode
-if ($updateMode -eq $True) {
+if ($updateMode) {
 	$copyMode		= $False
 	$archiveMode	= $False
 	$rgcopyMode = 'Update Mode'
 }
 # Archive Mode
-elseif ($archiveMode -eq $True) {
+elseif ($archiveMode) {
 	$copyMode		= $False
 	$rgcopyMode = 'Archive Mode'
 }
@@ -380,6 +438,16 @@ elseif ($archiveMode -eq $True) {
 else {
 	$copyMode		= $True
 	$rgcopyMode = 'Copy Mode'
+}
+
+# process only sourceRG ?
+if ($updateMode -or $justCreateSnapshots -or $justDeleteSnapshots -or $justRedeployAms) {
+	$targetRG = $sourceRG
+	$enableSourceRgMode = $True
+	$rgcopyMode = 'Update Mode'
+}
+else {
+	$enableSourceRgMode = $False
 }
 
 # constants
@@ -405,7 +473,7 @@ $azTagLun 					= 'rgcopy.smb.DiskLun'
 $azTagVM 					= 'rgcopy.smb.VM'
 
 # file names and location
-if ($(Test-Path $pathExportFolder) -eq $False) {
+if ($(Test-Path $pathExportFolder) -ne $True) {
 	$pathExportFolderNotFound = $pathExportFolder
 	$pathExportFolder = '~'
 
@@ -431,13 +499,13 @@ $savedRgcopyPath	= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.txt"
 $restorePath 		= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.RESTORE.ps1.txt"
 
 # file names for source RG processing
-if ($enableSourceRgMode -eq $True) {
+if ($enableSourceRgMode) {
 	$logPath		= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.SOURCE.log"
 	$zipPath 		= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.$timestampSuffix.zip"
 }
 
 # file names for backup RG
-if ($archiveMode -eq $True) {
+if ($archiveMode) {
 	$exportPath 	= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.TARGET.json"
 	$exportPathAms 	= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.AMS.json"
 }
@@ -445,10 +513,12 @@ if ($archiveMode -eq $True) {
 #--------------------------------------------------------------
 function test-match {
 #--------------------------------------------------------------
-	param (	$name,
-			$value,
-			$match,
-			$syntax )
+	param (
+		$name,
+		$value,
+		$match,
+		$syntax
+	)
 
 	if ($value -notmatch $match) {
 		if ($Null -eq $syntax) {
@@ -626,10 +696,12 @@ function test-names {
 #--------------------------------------------------------------
 function test-values {
 #--------------------------------------------------------------
-	param (	$parameterName,
-			$parameterValue,
-			$allowedValues,
-			$partName )
+	param (
+		$parameterName,
+		$parameterValue,
+		$allowedValues,
+		$partName
+	)
 
 	$list = '{'
 	$sep = ''
@@ -656,9 +728,11 @@ function test-values {
 #--------------------------------------------------------------
 function test-subnet {
 #--------------------------------------------------------------
-	param (	$parameterName,
-			$parameterValue,
-			$defaultSubnet )
+	param (
+		$parameterName,
+		$parameterValue,
+		$defaultSubnet
+	)
 
 	$param = $parameterValue -replace '\s+', ''
 
@@ -696,47 +770,26 @@ function test-subnet {
 }
 
 #--------------------------------------------------------------
-function disable-defaultValues {
-#--------------------------------------------------------------
-	if ('setDiskSku' -notin $boundParameterNames) {
-		$script:setDiskSku = @()
-	}
-	if ('setAcceleratedNetworking' -notin $boundParameterNames) {
-		$script:setAcceleratedNetworking = @()
-	}
-	if ('setVmZone' -notin $boundParameterNames) {
-		$script:setVmZone = @()
-	}
-	if ('setLoadBalancerSku' -notin $boundParameterNames) {
-		$script:setLoadBalancerSku = @()
-	}
-	if ('setPublicIpSku' -notin $boundParameterNames) {
-		$script:setPublicIpSku = @()
-	}
-	if ('setPublicIpAlloc' -notin $boundParameterNames) {
-		$script:setPublicIpAlloc = @()
-	}
-	if ('setPrivateIpAlloc' -notin $boundParameterNames) {
-		$script:setPrivateIpAlloc = @()
-	}
-	# if ('removeFQDN' -notin $boundParameterNames) {
-	# 	$script:removeFQDN = @()
-	# }
-}
-
-#--------------------------------------------------------------
 function write-logFile {
 #--------------------------------------------------------------
-	param (	[Parameter(Position=0)] $print,
-			[switch] $NoNewLine,
-			$ForegroundColor )
+	param (
+		$print,
+		$ForegroundColor,
+		[switch] $NoNewLine
+	)
 
-	if ($Null -eq $print) { $print = ' ' }
+	if ($Null -eq $print) {
+		$print = ' '
+	}
 	[string] $script:LogFileLine += $print
 
 	$par = @{ Object = $print }
-	if ($NoNewLine)					{ $par.Add('NoNewLine', $True) }
-	if ($Null -ne $ForegroundColor)	{ $par.Add('ForegroundColor', $ForegroundColor) }
+	if ($NoNewLine) {
+		$par.Add('NoNewLine', $True)
+	}
+	if ($Null -ne $ForegroundColor) {
+		$par.Add('ForegroundColor', $ForegroundColor)
+	}
 
 	Write-Host @par
 	if (!$NoNewLine) {
@@ -746,12 +799,46 @@ function write-logFile {
 }
 
 #--------------------------------------------------------------
+function write-LogFilePipe {
+#--------------------------------------------------------------
+	[CmdletBinding()]
+	Param (
+		[Parameter(Position=0, Mandatory=$true, ValueFromPipeline=$true)]
+		$InputObject
+	)
+	begin {
+		$log = @()
+	}
+	process {
+		$InputObject | Tee-Object -Variable variable
+		$log += $variable
+	}
+	end {
+		if ($PsStyle.OutputRendering -eq 'Ansi') {
+			$PsStyle.OutputRendering = 'PlainText'
+			$log | Out-File $logPath -Append
+			$PsStyle.OutputRendering = 'Ansi'
+		}
+		else {
+			$log | Out-File $logPath -Append
+		}
+	}
+}
+
+#--------------------------------------------------------------
 function write-logFileWarning {
 #--------------------------------------------------------------
-	param ( $myWarning,
-			$param2,
-			$param3,
-			$param4)
+	param ( 
+		$myWarning,
+		$param2,
+		$param3,
+		$param4,
+		[switch] $stopAtWarning
+	)
+
+	if ($stopAtWarning -and $forceVmChecks) {
+		write-logFileError $myWarning $param2 $param3 $param4
+	}
 
 	write-logFile "WARNING: $myWarning" -ForegroundColor 'yellow'
 
@@ -764,7 +851,9 @@ function write-logFileWarning {
 #--------------------------------------------------------------
 function write-zipFile {
 #--------------------------------------------------------------
-	param (	$exitCode)
+	param (
+		$exitCode
+	)
 
 	# exit code 0: exit RGCOPY regularly (no error)
 	if ($exitCode -eq 0) {
@@ -805,7 +894,7 @@ function write-zipFile {
 
 	# save zip file to BLOB
 	if (($Null -eq $exitCode) `
-	-or (($archiveMode -eq $True) -and ($exitCode -eq 0))) {
+	-or ($archiveMode -and ($exitCode -eq 0))) {
 		try {
 			# get SA
 			$sa = Get-AzStorageAccount `
@@ -838,14 +927,17 @@ function write-zipFile {
 #--------------------------------------------------------------
 function write-logFileError {
 #--------------------------------------------------------------
-	param (	$param1,
-			$param2,
-			$param3,
-			$lastError)
+	param (
+		$param1,
+		$param2,
+		$param3,
+		$param4,
+		[switch] $lastError
+	)
 
-	if ($lastError.length -ne 0) {
+	if ($lastError) {
 		write-logFile
-		write-logFile $lastError -ForegroundColor 'Red'
+		write-logFile $error[0] -ForegroundColor 'Red'
 	}
 	write-logFile
 	write-logFile ('=' * 60) -ForegroundColor 'DarkGray'
@@ -855,6 +947,9 @@ function write-logFileError {
 	}
 	if ($param3.length -ne 0) {
 		write-logFile $param3 -ForegroundColor 'yellow'
+	}
+	if ($param4.length -ne 0) {
+		write-logFile $param4 -ForegroundColor 'yellow'
 	}
 	write-logFile ('=' * 60) -ForegroundColor 'DarkGray'
 	write-logFile
@@ -874,15 +969,27 @@ function write-logFileError {
 #--------------------------------------------------------------
 function write-logFileUpdates {
 #--------------------------------------------------------------
-	param (	$resourceType,
-			$resource,
-			$action,
-			$value,
-			$comment1,
-			$comment2,
-			[switch] $NoNewLine,
-			[switch] $continue )
+	param (	
+		$resourceType,
+		$resource,
+		$action,
+		$value,
+		$comment1,
+		$comment2,
+		[switch] $NoNewLine,
+		[switch] $continue,
+		[switch] $defaultValue
+	)
 
+	# special color for variables
+	if ($resource -like '<*') {
+		$colorResource = 'Cyan'
+	}
+	else {
+		$colorREsource = 'Gray'
+	}
+	
+	# constant for string lengths
 	$resourceTypeLength = 18
 	$resourceLength = 35
 
@@ -891,7 +998,31 @@ function write-logFileUpdates {
 		$action = $resourceType
 		$value = $resource
 	}
-	$value = $value -as [string]
+	else {
+		# multi-part name
+		$parts = $resource -split '/'
+		$resourceType = $resourceType.PadRight($resourceTypeLength,' ').Substring(0,$resourceTypeLength)
+	
+		if ($parts.count -gt 1) {
+			if ($parts[0].length -gt 14) {
+				$part1 = $parts[0].Substring(0,11) + '.../'
+			}
+			else {
+				$part1 = $parts[0] + '/'
+			}
+			$part2 = $parts[-1].PadRight($resourceLength - $part1.length,' ').Substring(0,$resourceLength - $part1.length)
+	
+			Write-logFile $resourceType -NoNewline -ForegroundColor 'DarkGray'
+			write-logFile $part1 -NoNewline -ForegroundColor 'DarkGray'
+			write-logFile $part2 -NoNewline -ForegroundColor $colorResource
+		}
+		else {
+			$resource = $resource.PadRight($resourceLength,' ').Substring(0,$resourceLength)
+	
+			Write-logFile $resourceType -NoNewline -ForegroundColor 'DarkGray'
+			write-logFile $resource -NoNewline -ForegroundColor $colorResource
+		}
+	}
 
 	# colors for creation/deletion
 	if (($action -like 'delete*') -or ($action -like 'disable*')) {
@@ -904,51 +1035,22 @@ function write-logFileUpdates {
 		$colorAction = 'Green'
 	}
 
-	# special color for variables
-	if ($resource -like '<*') {
-		$colorResource = 'Cyan'
-	}
-	else {
-		$colorREsource = 'Gray'
-	}
-
-	# multi-part name
-	$parts = $resource -split '/'
-	$resourceType = $resourceType.PadRight($resourceTypeLength,' ').Substring(0,$resourceTypeLength)
-
-	if ($continue) {
-		write-logFile ' ' -NoNewline
-	}
-	elseif ($parts.count -gt 1) {
-		if ($parts[0].length -gt 14) {
-			$part1 = $parts[0].Substring(0,11) + '.../'
-		}
-		else {
-			$part1 = $parts[0] + '/'
-		}
-		$part2 = $parts[-1].PadRight($resourceLength - $part1.length,' ').Substring(0,$resourceLength - $part1.length)
-
-		Write-logFile $resourceType -NoNewline -ForegroundColor 'DarkGray'
-		write-logFile $part1 -NoNewline -ForegroundColor 'DarkGray'
-		write-logFile $part2 -NoNewline -ForegroundColor $colorResource
-	}
-	else {
-		$resource = $resource.PadRight($resourceLength,' ').Substring(0,$resourceLength)
-
-		Write-logFile $resourceType -NoNewline -ForegroundColor 'DarkGray'
-		write-logFile $resource -NoNewline -ForegroundColor $colorResource
-	}
-
+	$value = $value -as [string]
 	$len = $action.length + $value.length + $comment1.length + $comment2.length
 	if ($len -lt 24){
 		$pad = ' ' * (24 - $len)
 	}
 
-	Write-logFile "$action " -NoNewline -ForegroundColor $colorAction
-	Write-logFile $value				-NoNewline
+	Write-logFile "$action "			-NoNewline -ForegroundColor $colorAction
+	if ($defaultValue) {
+		Write-logFile $value			-NoNewline -ForegroundColor 'DarkGray'
+	}
+	else {
+		Write-logFile $value			-NoNewline
+	}
 	Write-logFile $comment1				-NoNewline -ForegroundColor 'Cyan'
 	if ($NoNewLine) {
-		Write-logFile "$comment2 $pad" -NoNewline
+		Write-logFile "$comment2 $pad"	-NoNewline
 	}
 	else {
 		Write-logFile $comment2
@@ -958,10 +1060,12 @@ function write-logFileUpdates {
 #--------------------------------------------------------------
 function write-logFileTab {
 #--------------------------------------------------------------
-	param (	$resourceType,
-			$resource,
-			$info,
-			[switch] $noColor )
+	param (
+		$resourceType,
+		$resource,
+		$info,
+		[switch] $noColor
+	)
 
 	$resourceColor = 'Green'
 	if ($noColor) { $resourceColor = 'Gray' }
@@ -974,8 +1078,10 @@ function write-logFileTab {
 #--------------------------------------------------------------
 function write-logFileForbidden {
 #--------------------------------------------------------------
-	param (	$parameter,
-			$array)
+	param (	
+		$parameter,
+		$array
+	)
 
 	if ($parameter -in $boundParameterNames) {
 		foreach ($boundParam in $array) {
@@ -988,49 +1094,12 @@ function write-logFileForbidden {
 }
 
 #--------------------------------------------------------------
-function test-azResult {
-#--------------------------------------------------------------
-	param (	$azFunction,
-			$errorText,
-			$errorText2,
-			[switch] $always )
-
-	if (($? -eq $False) -or ($always -eq $True) -or ($script:errorOccured -eq $True)) {
-		write-logFileError $errorText `
-							"$azFunction failed" `
-							$errorText2 `
-							$error[0]
-	}
-}
-
-#--------------------------------------------------------------
-function protect-secureString {
-#--------------------------------------------------------------
-	param (	$key, $value)
-
-	if (($value -is [securestring]) -or ($key -like '*passw*') -or ($key -like '*credential*')) {
-		return '*****'
-	}
-	return $value
-}
-
-#--------------------------------------------------------------
-function write-hashTableOutput {
-#--------------------------------------------------------------
-	param (	$key, $value)
-
-	$protectedValue = protect-secureString $key $value
-
-	$script:hashTableOutput += New-Object psobject -Property @{
-		Parameter	= $key
-		Value		= $protectedValue
-	}
-}
-
-#--------------------------------------------------------------
 function write-logFileHashTable {
 #--------------------------------------------------------------
-	param (	$paramHashTable)
+	param (
+		$paramHashTable,
+		[switch] $rgcopyParam
+	)
 
 	$script:hashTableOutput = @()
 	$paramHashTable.GetEnumerator()
@@ -1073,18 +1142,84 @@ function write-logFileHashTable {
 		}
 	}
 
-	$script:hashTableOutput
-	| Select-Object Parameter, Value
-	| Sort-Object Parameter
-	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	if ($rgcopyParam) {
+		$script:hashTableOutput
+		| Select-Object `
+			@{label="Type"; expression={
+				if (($_.Parameter -like 'source*') -or ($_.Parameter -like 'target*')) {
+					'RG'
+				}
+				elseif ($_.Parameter -in $workflowParameters) {
+					'workflow'
+				}
+				elseif (($_.Parameter -replace '\[\d+\]$', '') -in $variableTypeParameters) {
+					'config'
+				}
+				else {
+					"other"
+				}
+			}}, `
+			Parameter, `
+			Value
+		| Sort-Object @{Expression = "Type"; Descending = $true}, Parameter
+		| Format-Table
+		| write-LogFilePipe
+	}
+	else {
+		$script:hashTableOutput
+		| Select-Object Parameter, Value
+		| Sort-Object Parameter
+		| Format-Table
+		| write-LogFilePipe
+	}
+}
+
+#--------------------------------------------------------------
+function write-hashTableOutput {
+#--------------------------------------------------------------
+	param (
+		$key,
+		$value
+	)
+
+	if (($value -is [securestring]) -or ($key -like '*passw*') -or ($key -like '*credential*')) {
+		$protectedValue = '*****'
+	}
+	else {
+		$protectedValue = $value
+	}
+
+	$script:hashTableOutput += New-Object psobject -Property @{
+		Parameter	= $key
+		Value		= $protectedValue
+	}
+}
+
+#--------------------------------------------------------------
+function test-azResult {
+#--------------------------------------------------------------
+	param (	
+		$azFunction,
+		$errorText,
+		$errorText2,
+		[switch] $always
+	)
+
+	if (!$? -or $always -or $script:errorOccured) {
+		write-logFileError $errorText `
+							"$azFunction failed" `
+							$errorText2 `
+							-lastError
+	}
 }
 
 #--------------------------------------------------------------
 function write-actionStart {
 #--------------------------------------------------------------
-	param ( 	$text, $maxDegree)
+	param (
+		$text,
+		$maxDegree
+	)
 
 	if ($null -ne $maxDegree) {
 		if ($maxDegree -gt 1) {
@@ -1109,10 +1244,23 @@ function write-actionEnd {
 }
 
 #--------------------------------------------------------------
+function compare-resources{
+#--------------------------------------------------------------
+	param (
+		$res1,
+		$res2
+	)
+
+	return (($res1 -replace '\s+', '') -eq ($res2 -replace '\s+', ''))
+}
+
+#--------------------------------------------------------------
 function convertTo-array {
 #--------------------------------------------------------------
-	param ( $convertFrom,
-			[switch] $saveError )
+	param (
+		$convertFrom,
+		[switch] $saveError
+	)
 
 	# save last error status
 	if (($saveError) -and (!$?)) {
@@ -1151,7 +1299,9 @@ function convertTo-array {
 #--------------------------------------------------------------
 function get-ParameterConfiguration {
 #--------------------------------------------------------------
-	param (	$config)
+	param (
+		$config
+	)
 
 	# split configuration
 	$script:paramConfig1,$script:paramConfig2,$script:paramConfig3,$script:paramConfig4 = $config -split '/'
@@ -1298,10 +1448,12 @@ function set-parameter {
 # each rule has the form: configuration@resources
 # each configuration consists of many parts separated by slash (/)
 # resources are separated by comma (,)
-	param (	$parameterName,
-			$parameter,
-			$type,
-			$type2)
+	param (
+		$parameterName,
+		$parameter,
+		$type,
+		$type2
+	)
 
 	$script:paramName = $parameterName
 
@@ -1379,9 +1531,11 @@ function set-parameter {
 #--------------------------------------------------------------
 function get-scriptBlockParam {
 #--------------------------------------------------------------
-	param (	$scriptParameter,
-			$scriptBlock, 
-			$myMaxDOP )
+	param (
+		$scriptParameter,
+		$scriptBlock, 
+		$myMaxDOP
+	)
 	
 	if ($myMaxDOP -eq 1) {
 		return @{ Process = $scriptBlock }
@@ -1393,17 +1547,12 @@ function get-scriptBlockParam {
 }
 
 #--------------------------------------------------------------
-function compare-resources{
-#--------------------------------------------------------------
-	param (	$res1, $res2)
-
-	return (($res1 -replace '\s+', '') -eq ($res2 -replace '\s+', ''))
-}
-
-#--------------------------------------------------------------
 function get-functionBody {
 #--------------------------------------------------------------
-	param ( 	$str, $inputString)
+	param (
+		$str,
+		$inputString
+	)
 
 	$from = $str.IndexOf('(')
 	if ($from -eq -1) {
@@ -1424,9 +1573,11 @@ function get-functionBody {
 #--------------------------------------------------------------
 function remove-dependencies {
 #--------------------------------------------------------------
-	param (	$dependsOn,
-			$remove,
-			$keep)
+	param (
+		$dependsOn,
+		$remove,
+		$keep
+	)
 
 	if ($keep.length -ne 0) {
 		$return = convertTo-array ($dependsOn | Where-Object { $_ -like "*'$keep'*" })
@@ -1443,8 +1594,10 @@ function remove-dependencies {
 #--------------------------------------------------------------
 function remove-resources {
 #--------------------------------------------------------------
-	param (	$type,
-			$names)
+	param (
+		$type,
+		$names
+	)
 
 	if ('names' -notin $PSBoundParameters.Keys) {
 		$script:resourcesALL = convertTo-array ($script:resourcesALL | Where-Object `
@@ -1464,10 +1617,12 @@ function remove-resources {
 function get-resourceString {
 #--------------------------------------------------------------
 	# assembles string for Azure Resource ID
-	param (	$subscriptionID,	$resourceGroup,
-			$resourceArea,
-			$mainResourceType,	$mainResourceName,
-			$subResourceType,	$subResourceName)
+	param (	
+		$subscriptionID,	$resourceGroup,
+		$resourceArea,
+		$mainResourceType,	$mainResourceName,
+		$subResourceType,	$subResourceName
+	)
 
 	$resID = "/subscriptions/$subscriptionID/resourceGroups/$resourceGroup/providers/$resourceArea/$mainResourceType/$mainResourceName"
 	if ($Null -ne $subResourceType) { $resID += "/$subResourceType/$subResourceName" }
@@ -1478,9 +1633,11 @@ function get-resourceString {
 function get-resourceFunction {
 #--------------------------------------------------------------
 	# assembles string for Azure Resource ID using function resourceId()
-	param (	$resourceArea,
-			$mainResourceType, $mainResourceName,
-			$subResourceType,  $subResourceName)
+	param (
+		$resourceArea,
+		$mainResourceType, $mainResourceName,
+		$subResourceType,  $subResourceName
+	)
 
 	$resFunction = "[resourceId('$resourceArea/$mainResourceType"
 	if ($Null -ne $subResourceType) {
@@ -1513,9 +1670,11 @@ function get-resourceComponents {
 	#   "[concat(resourceId('Microsoft.Network/virtualNetworks', 'xxx'), '/subnets/yyy')]"
 	#   "[resourceId('Microsoft.Compute/disks', 'disk12')]"
 	#   "[concat(resourceId('Microsoft.Compute/disks', 'disk1'), '2')]"  # does not make sense, but found in exported ARM template!
-	param (	$inputString,
-			$subscriptionID,
-			$resourceGroup)
+	param (
+		$inputString,
+		$subscriptionID,
+		$resourceGroup
+	)
 
 	# remove white spaces
 	$condensedString = $inputString -replace '\s*', '' -replace "'", ''
@@ -1666,7 +1825,12 @@ function get-resourceComponents {
 #--------------------------------------------------------------
 function test-context{
 #--------------------------------------------------------------
-	param (	$mySub, $mySubUser, $mySubTenant, $myType)
+	param (
+		$mySub,
+		$mySubUser,
+		$mySubTenant,
+		$myType
+	)
 
 	# get context
 	if ($mySubTenant.length -eq 0) {
@@ -1684,11 +1848,12 @@ function test-context{
 	if ($Null -eq $myContext) {
 		write-logFile 'list of existing contexts:'
 		Get-AzContext -ListAvailable
-		| Select-Object @{label="AccountId"; expression={$_.Account.Id}}, `
-						@{label="SubscriptionName"; expression={$_.Subscription.Name}}, `
-						@{label="TenantId"; expression={$_.Tenant.Id}}
-		| Tee-Object -FilePath $logPath -append
-		| Out-Host
+		| Select-Object `
+			@{label="AccountId";        expression={$_.Account.Id}}, `
+			@{label="SubscriptionName"; expression={$_.Subscription.Name}}, `
+			@{label="TenantId";         expression={$_.Tenant.Id}}
+		| Format-Table
+		| write-LogFilePipe
 
 		write-logFileWarning "Run Connect-AzAccount before starting RGCOPY"
 		write-logFile
@@ -1704,14 +1869,16 @@ function test-context{
 		write-logFileError "Set-AzContext failed for user: $mySubUser" `
 							"Subscription:                  $mySub" `
 							"Tenant:                        $mySubTenant" `
-							$error[0]
+							-lastError
 	}
 }
 
 #--------------------------------------------------------------
 function set-context {
 #--------------------------------------------------------------
-	param (	$mySubscription)
+	param (
+		$mySubscription
+	)
 
 	if ($mySubscription -eq $script:currentSub) { return}
 
@@ -1742,21 +1909,24 @@ $tierStandardHDD  = @(                  'S4', 'S6', 'S10', 'S15', 'S20', 'S30', 
 #--------------------------------------------------------------
 function get-diskTier {
 #--------------------------------------------------------------
-	param (	$sizeGB, $SkuName)
+	param (
+		$sizeGB,
+		$SkuName
+	)
 
 	if ($sizeGB -eq 0) {
 		return $Null
 	}
 
 	switch ($SkuName) {
-		'Premium_LRS' {
+		{ 'Premium_LRS', 'Premium_ZRS' -eq $_ } {
 			for ($i = 0; $i -lt $sizesSortedSSD.Count; $i++) {
 				if ($sizeGB -le $sizesSortedSSD[$i]) {
 					return $tierPremiumSSD[$i]
 				}
 			}
 		}
-		'StandardSSD_LRS' {
+		{ 'StandardSSD_LRS', 'StandardSSD_ZRS' -eq $_ } {
 			for ($i = 0; $i -lt $sizesSortedSSD.Count; $i++) {
 				if ($sizeGB -le $sizesSortedSSD[$i]) {
 					return $tierStandardSSD[$i]
@@ -1780,7 +1950,9 @@ function get-diskTier {
 #--------------------------------------------------------------
 function get-diskSize {
 #--------------------------------------------------------------
-	param (	$tier)
+	param (
+		$tier
+	)
 
 	for ($i = 0; $i -lt $tierPremiumSSD.Count; $i++) {
 		if ($tier -eq $tierPremiumSSD[$i]) {
@@ -1801,26 +1973,27 @@ function get-diskSize {
 }
 
 #--------------------------------------------------------------
-function sync-skuProperties {
+function save-skuDefaultValue {
 #--------------------------------------------------------------
-# make sure that an entry exists in hashtable $script:vmSkus for each VM size
-# needed to avoid script errors when accessing the hashtable
-	param (	$vmSize)
+	param (
+		$vmSize
+	)
 
 	if ($Null -eq $script:vmSkus[$vmSize]) {
+		# if $skipVmChecks: all features are available
 		$script:vmSkus[$vmSize] = New-Object psobject -Property @{
 			Name                            = $vmSize
-			Family                          = 'unknown'
-			Tier                            = 'unknown'
+			Family                          = ''
+			Tier                            = ''
 			vCPUs                           = 1
-			MaxDataDiskCount                = 0
-			PremiumIO                       = $Null
-			MaxWriteAcceleratorDisksAllowed = 0
-			MaxNetworkInterfaces            = 0
-			AcceleratedNetworkingEnabled    = $Null
-			RdmaEnabled                     = $Null
-			HyperVGenerations               = 'unknown'
-			CpuArchitectureType             = 'unknown'
+			MemoryGB						= 0
+			MaxDataDiskCount                = 9999
+			PremiumIO                       = $True
+			MaxWriteAcceleratorDisksAllowed = 9999
+			MaxNetworkInterfaces            = 9999
+			AcceleratedNetworkingEnabled    = $True
+			HyperVGenerations               = 'V1,V2'
+			CpuArchitectureType             = 'x64'
 		}
 	}
 }
@@ -1829,13 +2002,14 @@ function sync-skuProperties {
 function save-skuProperties {
 #--------------------------------------------------------------
 # save properties of each VM size
-	if ($skipVmChecks -eq $True) { return }
+	$script:vmFamilies = @{}
+	$script:vmSkus = @{}
+	$script:diskSkuInRegion = @{}
+
+	if ($skipVmChecks) { return }
 
 	$savedSub = $script:currentSub
 	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
-
-	$script:vmFamilies = @{}
-	$script:vmSkus = @{}
 
 	# get SKUs for all VM sizes in target
 	$allSKUs = Get-AzComputeResourceSku `
@@ -1844,8 +2018,17 @@ function save-skuProperties {
 	test-azResult 'Get-AzComputeResourceSku'  "Could not get SKU properties for region '$targetLocation'" `
 					"You can skip this step using RGCOPY parameter switch 'skipVmChecks'"
 
+	# disk SKUs
 	$allSKUs
-	| Where-Object ResourceType -eq "virtualMachines"
+	| Where-Object ResourceType -eq 'disks'
+	| ForEach-Object {
+
+		$script:diskSkuInRegion[$_.Name] = $True
+	}
+
+	# VM SKUs
+	$allSKUs
+	| Where-Object ResourceType -eq 'virtualMachines'
 	| ForEach-Object {
 
 		$vmSize   = $_.Name
@@ -1858,12 +2041,14 @@ function save-skuProperties {
 		# default SKU properties
 		$vCPUs                           = 1
 		$MemoryGB                        = 0
-		$MaxDataDiskCount                = 0
-		$PremiumIO                       = $Null
-		$MaxWriteAcceleratorDisksAllowed = 0
-		$MaxNetworkInterfaces            = 0
-		$AcceleratedNetworkingEnabled    = $Null
-		$RdmaEnabled                     = $Null
+		$MaxDataDiskCount                = 9999
+		$PremiumIO                       = $True
+		$MaxWriteAcceleratorDisksAllowed = 0			# this property is not maintained in all SKUs
+		$MaxNetworkInterfaces            = 9999
+		$AcceleratedNetworkingEnabled    = $True
+		$HyperVGenerations               = 'V1,V2'		# 'V1, 'V2', 'V1,V2'
+		$CpuArchitectureType             = 'x64'		# 'x64', 'Arm64'
+
 
 		# get SKU properties
 		foreach($cap in $_.Capabilities) {
@@ -1875,7 +2060,6 @@ function save-skuProperties {
 				'MaxWriteAcceleratorDisksAllowed'   {$MaxWriteAcceleratorDisksAllowed = $cap.Value -as [int]; break}
 				'MaxNetworkInterfaces'              {$MaxNetworkInterfaces            = $cap.Value -as [int]; break}
 				'AcceleratedNetworkingEnabled'      {$AcceleratedNetworkingEnabled    = $cap.Value; break}
-				'RdmaEnabled'                       {$RdmaEnabled                     = $cap.Value; break}
 				'HyperVGenerations'                 {$HyperVGenerations               = $cap.Value; break}
 				'CpuArchitectureType'               {$CpuArchitectureType             = $cap.Value; break}
 			}
@@ -1893,17 +2077,9 @@ function save-skuProperties {
 			MaxWriteAcceleratorDisksAllowed = $MaxWriteAcceleratorDisksAllowed
 			MaxNetworkInterfaces            = $MaxNetworkInterfaces
 			AcceleratedNetworkingEnabled    = $AcceleratedNetworkingEnabled
-			RdmaEnabled                     = $RdmaEnabled
 			HyperVGenerations               = $HyperVGenerations
 			CpuArchitectureType             = $CpuArchitectureType
 		}
-	}
-
-	# add SKUs for additional VM sizes in source
-	$script:copyVMs.Values 
-	| ForEach-Object {
-
-		sync-skuProperties $_.VmSize
 	}
 
 	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
@@ -1913,7 +2089,7 @@ function save-skuProperties {
 function compare-quota {
 #--------------------------------------------------------------
 # check quotas in target region for each VM Family
-	if ($skipVmChecks -eq $True) { return }
+	if ($skipVmChecks) { return }
 
 	$savedSub = $script:currentSub
 	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
@@ -1931,7 +2107,7 @@ function compare-quota {
 	| ForEach-Object {
 
 		$vmFamily = $script:vmFamilies[$_.vmSize]
-		if (($updateMode -eq $True) -and ($_.vmSizeOld -eq $_.vmSize)) {
+		if ($updateMode -and ($_.vmSizeOld -eq $_.vmSize)) {
 			$vmFamily = $Null
 		}
 
@@ -1974,14 +2150,28 @@ function compare-quota {
 	# output of quota
 	$requiredCPUs.Values
 	| Sort-Object vmFamily
-	| Select-Object @{label="VM family";   expression={$_.vmFamily}}, `
-					@{label="CPUs used";   expression={ if ($_.usedCPUs -ne -1){$_.usedCPUs}else{''}} }, `
-					@{label="CPUs quota";  expression={ if ($_.limitCPUs -ne -1){$_.limitCPUs}else{''}} }, `
-					@{label="required for deployment";   expression={$_.neededCPUs}}, `
-					@{label="usage after deployment";expression={"$($_.usage)%"}}
+	| Select-Object `
+		@{label="VM family";  expression={$_.vmFamily}}, `
+		@{label="CPUs used";  expression={ 
+			if ($_.usedCPUs -ne -1) {
+				$_.usedCPUs
+			}
+			else{
+				''
+			}
+		}}, `
+		@{label="CPUs quota"; expression={
+			if ($_.limitCPUs -ne -1) {
+				$_.limitCPUs
+			}
+			else {
+				''
+			}
+		}}, `
+		@{label="required for deployment";  expression={$_.neededCPUs}}, `
+		@{label="usage after deployment";   expression={"$($_.usage)%"}}
 	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 
 	# check quota
 	$requiredCPUs.Values
@@ -1994,7 +2184,7 @@ function compare-quota {
 								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'"
 		}
 		if ($_.usage -gt 100) {
-			if (($skipDeployment -eq $True) -and ($updateMode -ne $True)) {
+			if ($skipDeployment -and !$updateMode) {
 				write-logFileWarning "Quota exceeded for VM family '$vmFamily' in region '$targetLocation'"
 			}
 			else {
@@ -2015,11 +2205,10 @@ function compare-quota {
 function assert-vmsStopped {
 #--------------------------------------------------------------
 	# check for running VM with more than one data disk or volume
-	if ( ($allowRunningVMs -eq $False) `
-	-and ($skipSnapshots -eq $False) `
+	if ( !$allowRunningVMs `
+	-and !$skipSnapshots `
 	-and ($pathPreSnapshotScript.length -eq 0) `
-	-and ($justCreateSnapshots -eq $False) `
-	-and ($script:runningVMs -eq $True)) {
+	-and $script:VMsRunning ) {
 		write-logFileError "Trying to copy non-deallocated VM with more than one data disk or volume" `
 							"Asynchronous snapshots could result in data corruption in the target VM" `
 							"Stop these VMs manually or use RGCOPY switch 'stopVMsSourceRG' for stopping ALL VMs"
@@ -2029,10 +2218,7 @@ function assert-vmsStopped {
 	$script:copyVMs.Values
 	| ForEach-Object {
 
-		if ( ($allowRunningVMs -eq $False) `
-		-and ($_.VmStatus -ne 'VM deallocated') `
-		-and ($useBlobsFromDisk -eq $True)) {
-
+		if ($useBlobsFromDisk -and !$allowRunningVMs -and ($_.VmStatus -ne 'VM deallocated')) {
 			write-logFileError "VM '$($_.Name)' is not deallocated" `
 								"VMs must be deallocated if parameter 'useBlobsFromDisk' is set" `
 								"Stop VMs manually or use RGCOPY switch 'stopVMsSourceRG' for stopping ALL VMs"
@@ -2043,11 +2229,9 @@ function assert-vmsStopped {
 	$script:copyVMs.Values
 	| ForEach-Object {
 
-		if ( ($allowRunningVMs -eq $False) `
-		-and ($_.VmStatus -ne 'VM deallocated') `
-		-and ($skipSnapshots -eq $False) `
+		if ( (!$allowRunningVMs -and !$skipSnapshots) `
 		-and ($pathPreSnapshotScript -eq 0) `
-		-and ($justCreateSnapshots -eq $False) `
+		-and ($_.VmStatus -ne 'VM deallocated') `
 		-and ($_.hasWA -eq $True)) {
 
 			write-logFileError "Trying to copy non-deallocated VM with Write Accelerator enabled" `
@@ -2058,34 +2242,116 @@ function assert-vmsStopped {
 }
 
 #--------------------------------------------------------------
+function show-snapshots {
+#--------------------------------------------------------------
+	write-actionStart "Display RGCOPY-snapshots in resource group '$sourceRG'"
+
+	$snapshots = Get-AzSnapshot -ResourceGroupName $sourceRG
+	test-azResult 'Get-AzSnapshot'  "Could not get snapshots of resource group $sourceRG"
+
+	$snapshots
+	| Where-Object Name -like '*.rgcopy'
+	| Sort-Object TimeCreated
+	| Select-Object `
+		@{label="TimeCreated"; expression={
+			'{0:yyyy-MM-dd HH:mm:ss \U\T\Cz}' -f ($_.TimeCreated).ToLocalTime()
+		}}, `
+		DiskSizeGB, `
+		Name
+	| Format-Table
+	| write-LogFilePipe
+
+	write-actionEnd
+}
+
+#--------------------------------------------------------------
 function show-sourceVMs {
 #--------------------------------------------------------------
 	$script:copyVMs.Values
 	| Sort-Object Name
-	| Select-Object @{label="VM name";   expression={$_.Name}}, `
-					@{label="VM size";   expression={$_.VmSize}}, `
-					@{label="DataDisks"; expression={$_.DataDisks.count}}, `
-					@{label="MountPoints"; expression={$_.MountPoints.count}}, `
-					@{label="Status";    expression={$_.VmStatus}}
+	| Select-Object `
+		@{label="VM name";     expression={$_.Name}}, `
+		@{label="VM size";     expression={$_.VmSize}}, `
+		@{label="DataDisks";   expression={$_.DataDisks.count}}, `
+		@{label="MountPoints"; expression={$_.MountPoints.count}}, `
+		@{label="NICs";        expression={$_.NicCount}}, `
+		@{label="Status";      expression={$_.VmStatus}}
 	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 
 	$script:copyDisks.Values
 	| Sort-Object Name
 	| Select-Object `
-		@{label="DiskName";  expression={$_.Name}}, `
-		VM, `
-		@{label="waEnabled"; expression={([string]($_.writeAcceleratorEnabled)).Replace('False','-')}}, `
-		@{label="Caching";   expression={([string]($_.Caching)).Replace('None','-')}}, `
+		@{label="Disk Name"; expression={
+			if ($_.Name.length -gt 30) {
+				$_.Name.Substring(0,30) + '..'
+			}
+			else {
+				$_.Name
+			}
+		}}, `
+		@{label="VM Name"; expression={
+			$VM = $_.ManagedBy -as [string]
+			if ($_.ManagedBy.count -gt 1) {
+				$VM = '{' + $VM + '}'
+			}
+			if ($VM.length -eq 0) {
+				'-'
+			}
+			elseif ($VM.length -gt 20) {
+				$VM.Substring(0,20) + '..'
+			}
+			else {
+				$VM
+			}
+		}}, `
+		@{label="Cache/WriteAccel"; expression={
+			if ($_.VM.length -eq 0) {
+				' ' * 16
+			}
+			elseif ($_.writeAcceleratorEnabled -eq $True) {
+				(([string]($_.Caching)).Replace('None','-') + ' / True').PadLeft(16)
+			}
+			else {
+				(([string]($_.Caching)).Replace('None','-') + ' / -').PadLeft(16)
+			}
+		}}, `
 		SizeGB, `
-		@{label="Size";      expression={$_.SizeTierName}}, `
-		@{label="PerfTier";  expression={if(($_.performanceTierName.length -eq 0) -or ($_.performanceTierName -eq $_.SizeTierName)) {'-'} else {$_.performanceTierName}}}, `
-		@{label="Skip";      expression={([string]($_.Skip)).Replace('False','-')}}, `
-		@{label="Image";     expression={([string]($_.Image)).Replace('False','-')}}
+		@{label="Size"; expression={
+			$_.SizeTierName
+		}}, `
+		@{label="Tier"; expression={
+			if (($_.performanceTierName.length -eq 0) -or ($_.performanceTierName -eq $_.SizeTierName)) {
+				'-'
+			} 
+			else {
+				$_.performanceTierName
+			}
+		}}, `
+		@{label="Burst"; expression={
+			if ($_.BurstingEnabled -ne $True) {
+				'-'
+			} 
+			else {
+				'True'
+			}
+		}}, `
+		@{label="ZRS"; expression={
+			if ($_.SkuName -like '*ZRS') {
+				'ZRS'
+			} 
+			else {
+				'-'
+			}
+		}}, `
+		@{label="Shares"; expression={
+			([string]($_.MaxShares)).Replace('1','-')
+		}}, `
+		@{label="Skip"; expression={
+			([string]($_.Skip)).Replace('False','-')
+		}}
 	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 }
 
 #--------------------------------------------------------------
@@ -2095,11 +2361,18 @@ function show-targetVMs {
 	$script:copyVMs.Values
 	| Where-Object Skip -ne $True
 	| Sort-Object Name
-	| Select-Object @{label="VM name";   expression={if($_.Rename.length -eq 0){$_.Name}else{"$($_.Rename) ($($_.Name))"}}}, `
-					@{label="VM size";   expression={$_.VmSize}}
+	| Select-Object `
+		@{label="VM name"; expression={
+			if ($_.Rename.length -eq 0) {
+				$_.Name
+			}
+			else {
+				"$($_.Rename) ($($_.Name))"
+			}
+		}}, `
+		@{label="VM size"; expression={$_.VmSize}}
 	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 
 	# oupput of disks
 	$allDisks =  convertTo-array $script:copyDisks.Values
@@ -2109,23 +2382,92 @@ function show-targetVMs {
 	| Sort-Object Name
 	| Where-Object Skip -ne $True
 	| Select-Object `
-		@{label="Disk name";  expression={if($_.Rename.length -eq 0){$_.Name}else{"$($_.Rename) ($($_.Name))"}}}, `
-		VM, `
-		@{label="WA enabled"; expression={([string]($_.writeAcceleratorEnabled)).Replace('False','-')}}, `
-		@{label="Caching";    expression={([string]($_.Caching)).Replace('None','-')}}, `
+		@{label="Disk Name"; expression={
+			if ($_.Rename.length -eq 0) {
+				if ($_.Name.length -gt 30) {
+					$_.Name.Substring(0,30) + '..'
+				}
+				else {
+					$_.Name
+				}
+			}
+			else {
+				if ($_.Rename.length -gt 30) {
+					$_.Rename.Substring(0,30) + '..'
+				}
+				else {
+					$_.Rename
+				}
+			}
+		}}, `
+		@{label="VM Name"; expression={
+			$VM = $_.ManagedBy -as [string]
+			if ($_.ManagedBy.count -gt 1) {
+				$VM = '{' + $VM + '}'
+			}
+			if ($VM.length -eq 0) {
+				'-'
+			}
+			elseif ($VM.length -gt 20) {
+				$VM.Substring(0,20) + '..'
+			}
+			else {
+				$VM
+			}
+		}}, `
+		@{label="Cache/WriteAccel"; expression={
+			if ($_.VM.length -eq 0) {
+				' ' * 16
+			}
+			elseif ($_.writeAcceleratorEnabled -eq $True) {
+				(([string]($_.Caching)).Replace('None','-') + ' / True').PadLeft(16)
+			}
+			else {
+				(([string]($_.Caching)).Replace('None','-') + ' / -').PadLeft(16)
+			}
+		}}, `
 		SizeGB, `
-		@{label="Size";       expression={$_.SizeTierName}}, `
-		@{label="PerfTier";   expression={if(($_.performanceTierName.length -eq 0) -or ($_.performanceTierName -eq $_.SizeTierName)) {'-'} else {$_.performanceTierName}}}
+		@{label="Size"; expression={
+			$_.SizeTierName
+		}}, `
+		@{label="PerfTier"; expression={
+			if (($_.performanceTierName.length -eq 0) -or ($_.performanceTierName -eq $_.SizeTierName)) {
+				'-'
+			} 
+			else {
+				$_.performanceTierName
+			}
+		}}, `
+		@{label="Burst"; expression={
+			if ($_.BurstingEnabled -ne $True) {
+				'-'
+			} 
+			else {
+				'True'
+			}
+		}}, `
+		@{label="ZRS"; expression={
+			if ($_.SkuName -like '*ZRS') {
+				'ZRS'
+			} 
+			else {
+				'-'
+			}
+		}}, `
+		@{label="Shares"; expression={
+			([string]($_.MaxShares)).Replace('1','-')
+		}}
 	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 }
 
 #--------------------------------------------------------------
 function get-remoteSubnets {
 #--------------------------------------------------------------
-	param (	$nicName,
-			$ipConfigurations )
+	param (
+		$nicName,
+		$ipConfigurations
+	)
 
 	$vnetRG			= $Null
 	$vnetName		= $Null
@@ -2204,29 +2546,28 @@ function update-NICsFromVM {
 				# add NIC to $script:sourceNICs
 				$script:sourceNICs += $remoteNIC
 
-				# add NIC to $script:copyNICs
-				if ($Null -ne $script:copyNICs[$nicName]) {
-					write-logFileError "RGCOPY does not support 2 NICs having the same name"
-										"NIC '$nicName' of VM '$vmName' is in subscription '$subID'"
+				$acceleratedNW = $remoteNIC.EnableAcceleratedNetworking
+				if ($Null -eq $acceleratedNW) {
+					$acceleratedNW = $False 
 				}
 
-				$acceleratedNW = $remoteNIC.EnableAcceleratedNetworking
-				if ($Null -eq $acceleratedNW) { $acceleratedNW = $False }
-				$vnetRG, $vnetName, $vnetId = get-remoteSubnets $nicName $remoteNIC.IpConfigurations
+				$nicNameNew = get-newRemoteName 'networkInterfaces' $nicRG $nicName
 
-				$script:copyNICs[$nicName] = @{
+				$vnetRG, $vnetName, $vnetId = get-remoteSubnets $nicName $remoteNIC.IpConfigurations
+				$vnetNameNew = get-newRemoteName 'virtualNetworks' $vnetRG $vnetName
+
+				$script:copyNICs[$nicNameNew] = @{
 					NicName 					= $nicName
+					NicNameNew					= $nicNameNew
 					NicRG						= $nicRG
 					VnetName					= $vnetName
+					VnetNameNew					= $vnetNameNew
 					VnetRG						= $vnetRG
 					VmName						= $vmName
 					EnableAcceleratedNetworking	= $acceleratedNW
 					RemoteNicId					= $nicId
 					RemoteVnetId				= $vnetId
 				}
-
-				set-remoteName 'networkInterfaces' $nicRG $nicName
-				set-remoteName 'virtualNetworks' $vnetRG $vnetName
 			}
 		}
 	}
@@ -2293,6 +2634,48 @@ function update-disksFromVM {
 			}
 		}
 	}
+
+	# do not skip shared disks
+	$script:copyDisks.Values
+	| ForEach-Object {
+
+		if (($_.Skip -eq $True) -and ($_.ManagedBy.count -gt 1)) {
+			$_.Skip = $False
+		}
+	}
+}
+
+#--------------------------------------------------------------
+function get-managingVMs {
+#--------------------------------------------------------------
+	param (
+		$ManagedByExtended,
+		$diskName
+	)
+
+	$vmNames = @()
+
+	foreach ($id in $ManagedByExtended) {
+		$r = get-resourceComponents $id
+
+		if ($r.subscriptionID -ne $sourceSubID) {
+			write-logFileWarning "Disk '$diskName' is managed by a resource in a different subscription"
+			continue
+		}
+
+		if ($r.resourceGroup -ne $sourceRG) {
+			write-logFileWarning "Disk '$diskName' is managed by a resource in a different resource group"
+			continue
+		}
+
+		if ($r.mainResourceType -ne 'virtualMachines') {
+			write-logFileWarning "Disk '$diskName' is managed by a resource of type '$($r.mainResourceType)'"
+			continue
+		}
+
+		$vmNames += $r.mainResourceName
+	}
+	Write-Output -NoEnumerate $vmNames
 }
 
 #--------------------------------------------------------------
@@ -2301,9 +2684,16 @@ function save-VMs {
 	$script:copyDisks = @{}
 	foreach ($disk in $script:sourceDisks) {
 
+		# get SKU
 		$sku = $disk.Sku.Name
-		if ($sku -notin @('Premium_LRS', 'StandardSSD_LRS', 'Standard_LRS', 'UltraSSD_LRS')) {
+		if ($sku -notin @('Premium_LRS', 'StandardSSD_LRS', 'Standard_LRS', 'UltraSSD_LRS', 'Premium_ZRS', 'StandardSSD_ZRS')) {
 			write-logFileError "Invalid disk SKU '$sku'"
+		}
+
+		# get bursting
+		$burstingEnabled = $disk.BurstingEnabled
+		if ($Null -eq $burstingEnabled) {
+			$burstingEnabled = $False
 		}
 
 		# calculate Tier
@@ -2311,28 +2701,43 @@ function save-VMs {
 		$SizeTierName			= get-diskTier $SizeGB $sku
 		$SizeTierGB				= get-diskSize $SizeTierName
 		$performanceTierName	= $disk.Tier
-		if (($sku -eq 'Premium_LRS') -and ($performanceTierName.length -eq 0)) {
+		if (($sku -like 'Premium_?RS') -and ($performanceTierName.length -eq 0)) {
 			$performanceTierName = $SizeTierName
 		}
-		elseif ($sku -ne'Premium_LRS') {
+		elseif ($sku -notlike 'Premium_?RS') {
 			$performanceTierName = $Null
 		}
 		$performanceTierGB		= get-diskSize $performanceTierName
+
+		# get maxShares
+		$maxShares = $disk.MaxShares
+		if ($Null -eq $maxShares) {
+			$maxShares = 1
+		}
+
+		# get VM names
+		$ManagedBy = get-managingVMs $disk.ManagedByExtended $disk.Name
+		if ($ManagedBy.count -eq 0) {
+			$ManagedBy = get-managingVMs $disk.ManagedBy $disk.Name
+		}
 
 		# save source disk
 		$script:copyDisks[$disk.Name] = @{
 			Name        			= $disk.Name
 			Rename					= ''
 			VM						= '' 		# will be updated below by VM info
+			ManagedBy				= $ManagedBy
+			MaxShares				= $maxShares
 			Skip					= $False 	# will be updated below by VM info
 			image					= $False 	# will be updated below by VM info
 			Caching					= 'None'	# will be updated below by VM info
 			WriteAcceleratorEnabled	= $False 	# will be updated below by VM info
 			AbsoluteUri 			= ''		# access token for copy to BLOB
 			SkuName     			= $sku
-			VmRestrictions			= $False # will be updated later
+			VmRestrictions			= $False	# will be updated later
 			DiskIOPSReadWrite		= $disk.DiskIOPSReadWrite #e.g. 1024
 			DiskMBpsReadWrite		= $disk.DiskMBpsReadWrite #e.g. 4
+			BurstingEnabled			= $burstingEnabled
 			SizeGB      			= $SizeGB					#e.g. 127
 			SizeTierName			= $SizeTierName				#e.g. P10
 			SizeTierGB				= $SizeTierGB				#e.g. 128	# maximum disk size for current tier
@@ -2409,50 +2814,51 @@ function save-VMs {
 
 	#--------------------------------------------------------------
 	$script:remoteNames = @{}
-	foreach ($vnetName in $script:sourceVNETs.Name) {
-		set-remoteName 'virtualNetworks' $sourceRG $vnetName
-	}
-
 	$script:copyNICs = @{}
+
 	# get NICs from source RG
 	foreach ($nic in $script:sourceNICs) {
 		$nicName = $nic.Name
 		$acceleratedNW = $nic.EnableAcceleratedNetworking
-		if ($Null -eq $acceleratedNW) { $acceleratedNW = $False }
+		if ($Null -eq $acceleratedNW) {
+			$acceleratedNW = $False 
+		}
+
+		get-newRemoteName 'networkInterfaces' $sourceRG $nicName | Out-Null
+
 		$vnetRG, $vnetName, $vnetId = get-remoteSubnets $nicName $nic.IpConfigurations
+		$vnetNameNew = get-newRemoteName 'virtualNetworks' $vnetRG $vnetName
 
 		# save NIC
 		$script:copyNICs[$nicName] = @{
 			NicName 					= $nicName
-			NicRG						= $sourceRG
+			NicNameNew					= $nicName		# not changed
+			NicRG						= $sourceRG		# not changed
 			VnetName					= $vnetName
+			VnetNameNew					= $vnetNameNew
 			VnetRG						= $vnetRG
 			VmName						= $Null # will be updated below
 			EnableAcceleratedNetworking	= $acceleratedNW
-			VmRestrictions				= $False # will be updated later
 			RemoteNicId					= $Null
 			RemoteVnetId				= $vnetId
 		}
-
-		set-remoteName 'networkInterfaces' $sourceRG $nicName
-		set-remoteName 'virtualNetworks' $vnetRG $vnetName
 	}
 }
 
 #--------------------------------------------------------------
-function set-remoteName {
+function get-newRemoteName {
 #--------------------------------------------------------------
-	param (	$resType,
-			$resGroup,
-			$resName )
+	param (
+		$resType,
+		$resGroup,
+		$resName
+	)
+	
+	$resKey = "$resType/$resGroup/$resName"
 
-	$found = $script:remoteNames.values
-			| Where-Object resType -eq $resType
-			| Where-Object resGroup -eq $resGroup
-			| Where-Object resName -eq $resName
-
-	if ($Null -ne $found) {
-		return
+	# new name already saved
+	if ($Null -ne $script:remoteNames[$resKey]) {
+		return $script:remoteNames[$resKey].newName
 	}
 
 	# max length of resource name
@@ -2467,45 +2873,46 @@ function set-remoteName {
 			$maxLength = 64
 		}
 	}
-	
-	# local RG, keep name
-	if ($resGroup -eq $sourceRG) {
-		$newName = $resName
+
+	$existingNames = ($script:remoteNames.values | Where-Object resType -eq $resType).newName
+
+	# get postfix for new name
+	$postfix = $resName -replace '^remote\d*-', ''
+	if ($postfix.length -eq 0) {
+		$postfix = $resType
 	}
-	# remote RG, calculate new name
-	else {
-		$script:remoteRGs += $resGroup
-		$existingNames = ($script:remoteNames.values | Where-Object resType -eq $resType).newName
 
-		# get postfix for new name
-		$postfix = $resName -replace '^remote\d*-', ''
-		if ($postfix.length -eq 0) {
-			$postfix = $resType
-		}
-
-		# get full new name
-		$newName = "remote-$postfix"
+	# get full new name
+	$newName = "remote-$postfix"
+	# truncate name
+	$len = ($maxLength, $newName.Length | Measure-Object -Minimum).Minimum
+	$newName = $newName.SubString(0,$len)
+	$i = 1
+	while ($newName -in $existingNames) {
+		$i++
+		$newName = "remote$i-$postfix"
 		# truncate name
 		$len = ($maxLength, $newName.Length | Measure-Object -Minimum).Minimum
 		$newName = $newName.SubString(0,$len)
-		$i = 1
-		while ($newName -in $existingNames) {
-			$i++
-			$newName = "remote$i-$postfix"
-			# truncate name
-			$len = ($maxLength, $newName.Length | Measure-Object -Minimum).Minimum
-			$newName = $newName.SubString(0,$len)
-		}
 	}
 
-	$resKey = "$resType/$resGroup/$resName"
+	# no rename needed for source RG
+	if ($resGroup -eq $sourceRG) {
+		$newName = $resName
+	}
+	else {
+		$script:remoteRGs += $resGroup
+	}
+	
+	# save new name
 	$script:remoteNames[$resKey] = @{
-		resKey		= $resKey
 		resType		= $resType
 		resGroup	= $resGroup
 		resName		= $resName
 		newName		= $newName
 	}
+
+	return $newName
 }
 
 #--------------------------------------------------------------
@@ -2791,7 +3198,7 @@ function update-paramSetVmDeploymentOrder {
 	}
 
 	# update from tag (if parameter setVmDeploymentOrder was NOT used)
-	if (($setVmDeploymentOrder.count -eq 0) -and ($ignoreTags -ne $True)) {
+	if (($setVmDeploymentOrder.count -eq 0) -and !$ignoreTags) {
 
 		$script:copyVMs.values
 		| ForEach-Object {
@@ -2824,7 +3231,7 @@ function update-paramSetVmTipGroup {
 		| ForEach-Object {
 
 			$_.Group = $tipGroup
-			if ($script:tipEnabled -ne $True) {
+			if (!$script:tipEnabled) {
 				write-logFileError "Parameter 'setVmTipGroup' not allowed" `
 									"Subscription is not TiP-enabled"
 			}
@@ -2837,8 +3244,8 @@ function update-paramSetVmTipGroup {
 	if (($setVmTipGroup.count -eq 0) `
 	-and ($createAvailabilitySet.count -eq 0) `
 	-and ($createProximityPlacementGroup.count -eq 0) `
-	-and ($ignoreTags -ne $True) `
-	-and ($script:tipEnabled -eq $True)) {
+	-and !$ignoreTags `
+	-and $script:tipEnabled ) {
 
 		$script:copyVMs.values
 		| ForEach-Object {
@@ -2955,7 +3362,7 @@ function update-paramGeneralizedVMs {
 	}
 
 	# Generalized only allowed with snapshots
-	if (($generalizedVMs.Count -ne 0) -and ($useBlobs -eq $True)) {
+	if ($useBlobs -and ($generalizedVMs.Count -ne 0)) {
 		write-logFileError "Invalid parameter 'generalizedVMs'" `
 							"Generalized VMs can only be created in the same region" `
 							"Using BLOB copy is not allowed"
@@ -2983,7 +3390,7 @@ function update-paramSkipVMs {
 
 	# skipped VMs have already be marked when creating $script:copyVMs
 	$script:skipVMs = @()
-	$script:runningVMs = $False
+	$script:VMsRunning = $False
 
 	$script:copyVMs.Values
 	| ForEach-Object {
@@ -3001,7 +3408,7 @@ function update-paramSkipVMs {
 		# check for running VM with more than one disk/volume
 		elseif ($_.VmStatus -ne 'VM deallocated') {
 			if (($_.DataDisks.count + $_.MountPoints.count) -gt 1) {
-				$script:runningVMs = $True
+				$script:VMsRunning = $True
 			}
 		}
 	}
@@ -3010,8 +3417,8 @@ function update-paramSkipVMs {
 #--------------------------------------------------------------
 function update-paramSkipDisks {
 #--------------------------------------------------------------
-	if (($skipDisks.count -eq 0) -and ($justCopyBlobs.count -eq 0)) { return }
-	
+	if ($updateMode) { return }
+
 	# skip disks when parameter is set
 	foreach ($diskName in $skipDisks) {
 		if ($Null -eq $script:copyDisks[$diskName]) {
@@ -3039,7 +3446,7 @@ function update-paramSkipDisks {
 	}
 
 	# skip disks that are not attached to any VM
-	if ($copyDetachedDisks -ne $True) {
+	if (!$copyDetachedDisks) {
 		$script:copyDisks.values
 		| ForEach-Object {
 
@@ -3057,7 +3464,7 @@ function update-paramSkipDisks {
 	| ForEach-Object {
 
 		if ($_.SkuName -eq 'UltraSSD_LRS') {
-			write-logFileError "Disk '$($_.Name)'' is an Ultra SSD disk" `
+			write-logFileError "Disk '$($_.Name)' is an Ultra SSD disk" `
 								"Ultra SSD disks cannot be copied" `
 								"Use parameter 'skipDisks' for skipping disk '$($_.Name)'"
 		}
@@ -3087,7 +3494,10 @@ function update-paramSkipDisks {
 #--------------------------------------------------------------
 function test-vmParameter {
 #--------------------------------------------------------------
-	param (	$paramName, $paramValue)
+	param (
+		$paramName,
+		$paramValue
+	)
 
 	# check data type
 	if ($paramValue -is [string]) {
@@ -3164,19 +3574,51 @@ function update-paramSetVmSize {
 		}
 	}
 
-	#--------------------------------------------------------------
-	# check consistency
-	if ($skipVmChecks -eq $True) { return }
-
+	# output of ALL issues
 	$script:copyVMs.Values
 	| Where-Object Skip -ne $True
 	| ForEach-Object {
 
 		$vmName = $_.Name
 		$vmSize = $_.VmSize
+		
+		if ($skipVmChecks) {
+			save-skuDefaultValue $vmSize
+		}
+		else {
+			# check VM family
+			if ($Null -eq $script:vmSkus[$vmSize]) {
+				write-logFileWarning "Size '$vmSize' of VM '$vmName' is not available in region '$targetLocation'" 
+			}
+			else {
+				# check data disk count
+				$diskCount = $_.NewDataDiskCount
+				$diskCountMax = $script:vmSkus[$vmSize].MaxDataDiskCount
+				if ($diskCount -gt $diskCountMax) {
+					write-logFileWarning "Size '$vmSize' of VM '$vmName' only supports $diskCountMax data disk(s)"
+				}
+	
+				# check NIC count
+				$nicCount = $_.NicCount
+				$nicCountMax = $script:vmSkus[$vmSize].MaxNetworkInterfaces
+				if ($nicCount -gt $nicCountMax) {
+					write-logFileWarning "Size '$vmSize' of VM '$vmName' only supports $nicCountMax network interface(s)"
+				}
+			}
+		}
+	}
+
+	# output of changes
+	$script:copyVMs.Values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		$vmName = $_.Name
+		$vmSize = $_.VmSize
 
 		# check VM family
-		if ($Null -eq $script:vmFamilies[$vmSize]) {
+		if ($Null -eq $script:vmSkus[$vmSize]) {
 			write-logFileError "VM consistency check failed" `
 								"Size '$vmSize' of VM '$vmName' is not available in region '$targetLocation'" `
 								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'"
@@ -3185,11 +3627,7 @@ function update-paramSetVmSize {
 		# check data disk count
 		$diskCount = $_.NewDataDiskCount
 		$diskCountMax = $script:vmSkus[$vmSize].MaxDataDiskCount
-
-		if ($diskCountMax -le 0) {
-			write-logFileWarning "Could not get property 'MaxDataDiskCount' of VM size '$vmSize'"
-		}
-		elseif ($diskCount -gt $diskCountMax) {
+		if ($diskCount -gt $diskCountMax) {
 			write-logFileError "VM consistency check failed" `
 								"Size '$vmSize' of VM '$vmName' only supports $diskCountMax data disk(s)" `
 								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'"
@@ -3198,11 +3636,7 @@ function update-paramSetVmSize {
 		# check NIC count
 		$nicCount = $_.NicCount
 		$nicCountMax = $script:vmSkus[$vmSize].MaxNetworkInterfaces
-
-		if ($nicCountMax -le 0) {
-			write-logFileWarning "Could not get property 'MaxNetworkInterfaces' of VM size '$vmSize'"
-		}
-		elseif ($nicCount -gt $nicCountMax) {
+		if ($nicCount -gt $nicCountMax) {
 			write-logFileError "VM consistency check failed" `
 								"Size '$vmSize' of VM '$vmName' only supports $nicCountMax network interface(s)" `
 								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'"
@@ -3210,29 +3644,28 @@ function update-paramSetVmSize {
 
 		# check HyperVGeneration
 		$hvGen = $_.OsDisk.HyperVGeneration
-		if ($hvGen.length -eq 0) { $hvGen = 'V1' }
-
+		if ($hvGen.length -eq 0) { 
+			$hvGen = 'V1'
+		}
 		$hvGenAllowed = $script:vmSkus[$vmSize].HyperVGenerations
-		if ($hvGenAllowed.length -eq 0) { $hvGenAllowed = 'V1' }
-
 		if ($hvGenAllowed -notlike "*$hvGen*") {
 			write-logFileError "VM consistency check failed" `
 								"HyperVGeneration '$hvGen' of VM '$vmName' not supported by VM size '$vmSize'" `
 								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'"
 		}
 
-		# check CpuArchitectureType
-		$vmSizeOld = $_.VmSizeOld
-		$cpuTypeOld = $script:vmSkus[$vmSizeOld].CpuArchitectureType
-		if ($cpuTypeOld.length -eq 0) { $cpuTypeOld = 'x64' }
-
-		$cpuTypeNew = $script:vmSkus[$vmSize].CpuArchitectureType
-		if ($cpuTypeNew.length -eq 0) { $cpuTypeNew = 'x64' }
-
-		if ($cpuTypeOld -ne $cpuTypeNew) {
-			write-logFileError "Cannot change from CPU architecture '$cpuTypeOld' (VM size '$vmSizeOld')" `
-								"to CPU architecture '$cpuTypeNew' (VM size '$vmSize')" `
-								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'"
+		# check CpuArchitectureType: 'x64', 'Arm64'
+		if (!$skipVmChecks) {
+			$cpuTypeOld = $script:vmSkus[$_.VmSizeOld].CpuArchitectureType
+			# old VM size might not be available in target region
+			if ($Null -ne $cpuTypeOld) {
+				$cpuTypeNew = $script:vmSkus[$_.VmSize].CpuArchitectureType
+				if ($cpuTypeOld -ne $cpuTypeNew) {
+					write-logFileError "Cannot change from CPU architecture '$cpuTypeOld' (VM size '$($_.VmSizeOld)')" `
+										"to CPU architecture '$cpuTypeNew' (VM size '$vmSize')" `
+										"You can skip this check using RGCOPY parameter switch 'skipVmChecks'"
+				}
+			}
 		}
 	}
 }
@@ -3240,33 +3673,51 @@ function update-paramSetVmSize {
 #--------------------------------------------------------------
 function update-paramSetVmZone {
 #--------------------------------------------------------------
+	# process RGCOPY parameter
 	set-parameter 'setVmZone' $setVmZone
 	get-ParameterRule
 	while ($Null -ne $script:paramConfig) {
 
 		$vmZone = $script:paramConfig
 		test-values 'setVmZone' $vmZone @('0','1','2','3') 'zone'
-
-		$zoneName = $VmZone
-		if ($zoneName -eq '0') { $zoneName = '0 (no zone configured)' }
 		$vmZone = $vmZone -as [int]
 
 		$script:copyVMs.values
 		| Where-Object Name -in $script:paramVMs
 		| ForEach-Object {
 
-			if ($_.vmZone -ne $VmZone) {
+			$_.VmZoneNew = $vmZone
+		}
+		get-ParameterRule
+	}
 
-				$_.vmZone = $VmZone
-				write-logFileUpdates 'virtualMachines' $_.Name 'set zone' '' '' $zoneName
-				$script:countVmZone++
-			}
-			else {
-				write-logFileUpdates 'virtualMachines' $_.Name 'keep zone' '' '' $zoneName
-			}
+	# output of changes
+	$script:copyVMs.Values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		$current	= $_.VmZone
+		$wanted		= $_.VmZoneNew
+		if ($Null -eq $wanted) {
+			$wanted = $current
 		}
 
-		get-ParameterRule
+		# update
+		if ($current -ne $wanted) {
+			$_.VmZone = $wanted
+			$action = 'set'
+		}
+		else {
+			$action = 'keep'
+		}
+		# output
+		if ($_.VmZone -eq 0) {
+			write-logFileUpdates 'virtualMachines' $_.Name "$action zone" '0 (no zone configured)' -defaultValue
+		}
+		else {
+			write-logFileUpdates 'virtualMachines' $_.Name "$action zone" $_.VmZone
+		}
 	}
 }
 
@@ -3279,16 +3730,13 @@ function update-paramSetDiskSku {
 	while ($Null -ne $script:paramConfig) {
 
 		$sku = $script:paramConfig
-		test-values 'setDiskSku' $sku @('Premium_LRS', 'StandardSSD_LRS', 'Standard_LRS') 'sku'
+		test-values 'setDiskSku' $sku @('Premium_LRS', 'StandardSSD_LRS', 'Standard_LRS', 'Premium_ZRS', 'StandardSSD_ZRS') 'sku'
 
 		$script:copyDisks.values
 		| Where-Object {$_.Name -in $script:paramDisks}
 		| ForEach-Object {
 
-			# UltraSSD cannot be changed
-			if ($_.SkuName -ne 'UltraSSD_LRS') {
-				$_.SkuNameNew = $sku
-			}
+			$_.SkuNameNew = $sku
 		}
 		get-ParameterRule
 	}
@@ -3303,110 +3751,93 @@ function update-paramSetDiskSku {
 		$vmName		= $_.VM
 		$current	= $_.SkuName
 		$wanted		= $_.SkuNameNew
+
+		# check for UltraSSD_LRS
+		if (($current -eq 'UltraSSD_LRS') -and ($Null -ne $wanted)) {
+			write-logFileWarning "Disk SKU 'UltraSSD_LRS' of disk '$diskName' cannot be changed'" -stopAtWarning
+			$wanted = $current
+		}
+
 		if ($Null -eq $wanted) {
 			$wanted = $current
 		}
 
-		# disk not attached
+		# check if premiumIO is allowed
 		if ($vmName.length -eq 0) {
 			write-logFileWarning "Disk '$diskName' not attached to a VM"
-
-			if ($wanted -eq $current) {
-				write-logFileUpdates 'disks' $diskName 'keep SKU' $current
-			}
-			else {
-				$_.SkuName				= $wanted
-				$_.SizeTierName			= get-diskTier $_.SizeGB $_.SkuName
-				$_.SizeTierGB			= get-diskSize $_.SizeTierName
-				if ($_.SkuName -ne 'Premium_LRS') {
-					$_.performanceTierGB	= 0
-					$_.performanceTierName	= $Null
+			$vmSize				= $Null
+			$allowedPremiumIO	= $True
+		}
+		else {
+			foreach ($vmName in $_.ManagedBy) {
+				$vmSize				= $script:copyVMs[$vmName].VmSize
+				$allowedPremiumIO	= $script:vmSkus[$vmSize].PremiumIO
+	
+				if ($allowedPremiumIO -ne $True) {
+					$_.VmRestrictions = $True # disks must be updated BEFORE updating VM size
+					break
 				}
-				else {
-					$_.performanceTierGB	= $_.SizeTierGB
-					$_.performanceTierName	= $_.SizeTierName
-				}
-				write-logFileUpdates 'disks' $diskName 'set SKU' $wanted
-				$script:countDiskSku++
 			}
 		}
 
-		# disk attached
-		else {
-			$vmSize		= $script:copyVMs[$vmName].VmSize
-			$allowed	= $script:vmSkus[$vmSize].PremiumIO
-			if ($Null -eq $allowed) {
-				write-logFileWarning "Could not get property 'PremiumIO' of VM size '$vmSize'"
-				$allowed = $True
-			}
+		# do not allow changing shared disks to standard_LRS
+		if (($_.ManagedBy.count -gt 1) -and ($wanted -eq 'Standard_LRS') -and ($current -ne 'Standard_LRS')) {
+			write-logFileWarning "Cannot changed disk SKU to 'Standard_LRS' because disk is attached to 2+ VMs" -stopAtWarning
+			$wanted = $current
+		}
 
-			if ($allowed -eq $False) {
-				$_.VmRestrictions = $True # disks must be updated BEFORE updating VM size
+		# ZRS available in region?
+		if (($Null -eq $script:diskSkuInRegion[$wanted]) -and !$skipVMChecks) {
+			if ($wanted -eq 'Premium_ZRS') {
+				write-logFileWarning "Disk SKU '$wanted' is not available in region '$targetLocation'" -stopAtWarning
+				$wanted = 'Premium_LRS'
 			}
-
-			# keep non-premium
-			if (($wanted -eq $current) -and ($wanted -in @('StandardSSD_LRS', 'Standard_LRS'))) {
-				write-logFileUpdates 'disks' $diskName 'keep SKU' $current
+			elseif ($wanted -eq 'StandardSSD_ZRS') {
+				write-logFileWarning "Disk SKU '$wanted' is not available in region '$targetLocation'" -stopAtWarning
+				$wanted = 'StandardSSD_LRS'
 			}
-			# set non-premium
-			elseif (($wanted -ne $current) -and ($wanted -in @('StandardSSD_LRS', 'Standard_LRS'))) {
-				$_.SkuName				= $wanted
-				$_.SizeTierName			= get-diskTier $_.SizeGB $_.SkuName
-				$_.SizeTierGB			= get-diskSize $_.SizeTierName
-				$_.performanceTierGB	= 0
-				$_.performanceTierName	= $Null
-				write-logFileUpdates 'disks' $diskName 'set SKU' $wanted
-				$script:countDiskSku++
-			}
-			# keep premium
-			elseif ($wanted -eq $current) {
-
-				if ($allowed -eq $False) {
-					if ($current -eq 'UltraSSD_LRS') {
-						write-logFileError "Size '$vmSize' of VM '$vmName' does not support Premium IO" `
-											"However, disk '$diskName' has SKU 'UltraSSD_LRS'"
-					}
-					else {
-						write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Premium IO"
-						$_.SkuName = 'StandardSSD_LRS'
-						write-logFileUpdates 'disks' $diskName 'set SKU' 'StandardSSD_LRS'
-						$script:countDiskSku++
-					}
-				}
-				elseif ($allowed -eq $True) {
-					if ($current -eq 'UltraSSD_LRS') {
-						write-logFileWarning "Disk '$diskName' is 'UltraSSD_LRS'. Changing VM size or zone might fail"
-					}
-					write-logFileUpdates 'disks' $diskName 'keep SKU' $current
-				}
-			}
-			# set premium
 			else {
+				write-logFileError "Disk SKU '$wanted' is not available in region '$targetLocation'"
+			}
+		}
 
-				if ($allowed -eq $False) {
-					write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Premium IO"
-					if ($current -ne 'StandardSSD_LRS') {
-						$_.SkuName 				= 'StandardSSD_LRS'
-						$_.SizeTierName			= get-diskTier $_.SizeGB $_.SkuName
-						$_.SizeTierGB			= get-diskSize $_.SizeTierName
-						$_.performanceTierGB	= 0
-						$_.performanceTierName	= $Null
-						write-logFileUpdates 'disks' $diskName 'set SKU' 'StandardSSD_LRS'
-						$script:countDiskSku++
-					}
-					else {
-						write-logFileUpdates 'disks' $diskName 'keep SKU' 'StandardSSD_LRS'
-					}
-				}
-				else {
-					$_.SkuName				= $wanted
-					$_.SizeTierName			= get-diskTier $_.SizeGB $_.SkuName
-					$_.SizeTierGB			= get-diskSize $_.SizeTierName
-					$_.performanceTierGB	= $_.SizeTierGB
-					$_.performanceTierName	= $_.SizeTierName
-					write-logFileUpdates 'disks' $diskName 'set SKU' $wanted
-					$script:countDiskSku++
-				}
+		# premium IO supported for VM?
+		if (($allowedPremiumIO -eq $False) -and ($wanted -eq 'UltraSSD_LRS')) {
+			write-logFileError "Size '$vmSize' of VM '$vmName' does not support Premium IO" `
+								"However, disk '$diskName' has SKU 'UltraSSD_LRS'"
+		}
+		elseif (($allowedPremiumIO -eq $False) -and ($wanted -eq 'Premium_ZRS')) {
+			write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Premium IO" -stopAtWarning
+			$wanted = 'StandardSSD_ZRS'
+		}
+		elseif (($allowedPremiumIO -eq $False) -and ($wanted -eq 'Premium_LRS')) {
+			write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Premium IO" -stopAtWarning
+			$wanted = 'StandardSSD_LRS'
+		}
+
+		# output
+		if ($wanted -eq $current) {
+			write-logFileUpdates 'disks' $diskName 'keep SKU' $_.SkuName
+		}
+		else {
+			# calculate new Tier
+			$_.SkuName		= $wanted
+			$_.SizeTierName	= get-diskTier $_.SizeGB $_.SkuName
+			$_.SizeTierGB	= get-diskSize $_.SizeTierName
+
+			write-logFileUpdates 'disks' $diskName 'set SKU' $_.SkuName
+			$script:countDiskSku++
+
+			# adjust perfromance tier if SKU has changed
+			# SKU was premium and became non-premium
+			if (($current -like 'Premium_?RS') -and ($wanted -notlike 'Premium_?RS')) {
+				$_.performanceTierName	= $Null
+				$_.performanceTierGB	= 0
+			}
+			# SKU was non-premium and became premium
+			elseif (($current -notlike 'Premium_?RS') -and ($wanted -like 'Premium_?RS')) {
+				$_.performanceTierName	= $_.SizeTierName
+				$_.performanceTierGB	= $_.SizeTierGB
 			}
 		}
 	}
@@ -3462,9 +3893,120 @@ function update-paramSetDiskSize {
 }
 
 #--------------------------------------------------------------
+function update-paramSetDiskMaxShares {
+#--------------------------------------------------------------
+	# process RGCOPY parameter
+	set-parameter 'setDiskMaxShares' $setDiskMaxShares
+	get-ParameterRule
+	while ($Null -ne $script:paramConfig) {
+
+		$maxSharesConfig = $script:paramConfig -as [int]
+		if ($maxSharesConfig -le 0) {
+			write-logFileError "Invalid parameter 'setDiskMaxShares'" `
+								"value must be 1 or higher"
+		}
+
+		$script:copyDisks.values
+		| Where-Object {$_.Name -in $script:paramDisks}
+		| ForEach-Object {
+
+			$_.MaxSharesNew = $maxSharesConfig
+		}
+		get-ParameterRule
+	}
+
+	# output of changes
+	$script:copyDisks.values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		$current = $_.MaxShares
+		$wanted  = $_.MaxSharesNew
+		if ($Null -eq $wanted) {
+			$wanted = $current
+		}
+
+		# check maximum number of shares
+		$sizeTierName = $_.SizeTierName
+		if ($sizeTierName -in @('P1','P2','P3','P4','P6','P10','P15','P20','E1','E2','E3','E4','E6','E10','E15','E20')) {
+			$maxWanted = 3
+		}
+		elseif ($sizeTierName -in @('P30','P40','P50','E30','E40','E50')) {
+			$maxWanted = 5
+		}
+		elseif ($sizeTierName -in @('P60','P70','P80','E60','E70','E80')) {
+			$maxWanted = 10
+		}
+		elseif ($sizeTierName -eq 'Ultra') {
+			$maxWanted = 5
+		}
+		else {
+			$maxWanted = 1
+		}
+		if ($wanted -gt $maxWanted) {
+			write-logFileWarning "Disk size '$sizeTierName' only supports up to $maxWanted shares" -stopAtWarning
+			$wanted = $maxWanted
+		}
+
+		# check if it is a DATA disk
+		if (($_.OsType.length -ne 0) -and ($wanted -gt 1)) {
+			write-logFileWarning "Shared disks are only supported for data disks" -stopAtWarning
+			$wanted = 1
+			$maxWanted = 1
+		}
+
+		# check disk SKU
+		if (($_.SkuName -notlike 'Premium_?RS') -and ($_.SkuName -notlike '*SSD*') -and ($wanted -gt 1)) {
+			write-logFileWarning "Shared disks are not supported for SKU '$($_.SkuName)'" -stopAtWarning
+			$wanted = 1
+			$maxWanted = 1
+		}
+
+		# check if disk is detached
+		if (($_.ManagedBy.count -ne 0) -and $updateMode -and ($wanted -ne $current)) {
+			if ($current -le $maxWanted) {
+				write-logFileWarning "Cannot change Disk Max Shares for an attached disk" -stopAtWarning
+				$wanted = $current
+			}
+			else {
+				write-logFileError "Cannot change Max Shares of disk '$($_.Name)' to $wanted" `
+									"because disk SKU is '$($_.SkuName)'" `
+									"and the disk is attached to VM '$($_.VM)'"
+			}
+		}
+
+		# check for bursting
+		if (($_.BurstingEnabled -eq $True) -and ($wanted -gt 1)) {
+			write-logFileWarning "Bursting is not supported for shared disks" -stopAtWarning
+			$_.BurstingEnabled = $False
+			write-logFileUpdates 'disks' $_.Name 'set busting' 'off'
+		}
+
+		# update
+		if ($current -ne $wanted) {
+			$_.MaxShares = $wanted
+			$action = 'set'
+		}
+		else {
+			$action = 'keep'
+		}
+		# output
+		if ($_.MaxShares -eq 1) {
+			write-logFileUpdates 'disks' $_.Name "$action max shares" $_.MaxShares -defaultValue
+		}
+		else {
+			write-logFileUpdates 'disks' $_.Name "$action max shares" $_.MaxShares
+		}
+	}
+}
+
+#--------------------------------------------------------------
 function show-paramSetDiskSize {
 #--------------------------------------------------------------
-	param (	$disk )
+	param (
+		$disk
+	)
 
 	if (($Null -ne $disk.SizeGBNew) -and ($disk.SizeGBOld -ne $disk.SizeGBNew)) {
 		write-logFileUpdates 'disks' $_.Name 'set size' "$($disk.SizeGB) GiB ($($disk.SizeTierName))" -NoNewLine
@@ -3484,24 +4026,13 @@ function update-paramSetDiskTier {
 
 		$tierName = $script:paramConfig.ToUpper()
 		test-values 'setDiskTier' $tierName @( 'P0', 'P1', 'P2', 'P3', 'P4', 'P6', 'P10', 'P15', 'P20', 'P30', 'P40', 'P50', 'P60', 'P70', 'P80') 'tier'
-
 		$tierSizeGB = get-diskSize $tierName
 
 		$script:copyDisks.values
 		| Where-Object {$_.Name -in $script:paramDisks}
 		| ForEach-Object {
 
-			$performanceTierGB = $tierSizeGB
-			# clear performance tier
-			if (($tierName -eq 'P0') -or ($performanceTierGB -lt $_.SizeTierGB)) {
-				$performanceTierGB = $_.SizeTierGB
-			}
-			# max performance tier is P50 for P1 .. P50
-			elseif (($performanceTierGB -gt 4096) -and ($_.SizeTierGB -le 4096)) {
-				$performanceTierGB = 4096
-			}
-
-			$_.performanceTierGBNew = $performanceTierGB
+			$_.performanceTierGBNew = $tierSizeGB
 		}
 		get-ParameterRule
 	}
@@ -3512,47 +4043,120 @@ function update-paramSetDiskTier {
 	| Sort-Object Name
 	| ForEach-Object {
 
+		$current = $_.performanceTierGB
+		if ($current -eq $_.SizeTierGB) {
+			$current = 0
+		}
+		$wanted  = $_.performanceTierGBNew
+		if ($Null -eq $wanted) {
+			$wanted = $current
+		}
+
+		# max performance tier is P50 for P1 .. P50
+		if (($wanted -gt 4096) -and ($_.SizeTierGB -le 4096)) {
+			$wanted = 4096
+		}
+
+		# less than minimum or no tier
+		if ($wanted -le $_.SizeTierGB) {
+			$wanted = 0
+		}
+
 		# sku not allowed
-		if ($_.SkuName -ne 'Premium_LRS') {
+		if ($_.SkuName -notlike 'Premium_?RS') {
 			$_.performanceTierGB = 0
 			$_.performanceTierName = $Null
 			show-paramSetDiskSize $_
-			write-logFile
+			write-logFileUpdates "no performance tier possible" -continue
 		}
-		# parameter set but not allowed
-		elseif (($Null -ne $_.performanceTierGBNew) -and ($_.performanceTierGBNew -le $_.SizeTierGB)) {
-			if ($_.performanceTierGB -eq $_.SizeTierGB) {
-				show-paramSetDiskSize $_
-				write-logFileUpdates 'no performance tier' -continue
+		# premium SKU
+		else {
+			show-paramSetDiskSize $_
+
+			# update
+			if ($wanted -eq 0) {
+				$_.performanceTierGB = $_.SizeTierGB
 			}
 			else {
-				$_.performanceTierGB = $_.SizeTierGB
-				$_.performanceTierName = get-diskTier $_.performanceTierGB $_.SkuName
-				show-paramSetDiskSize $_
-				write-logFileUpdates 'disable performance tier' -continue
+				$_.performanceTierGB = $wanted
 			}
-		}
-		# parameter set and allowed
-		elseif ($Null -ne $_.performanceTierGBNew) {
-			if ($_.performanceTierGBNew -eq $_.performanceTierGB) {
-				show-paramSetDiskSize $_
+			$_.performanceTierName = get-diskTier $_.performanceTierGB $_.SkuName
+
+			# output
+			if (($wanted -eq 0) -and ($current -eq -0)) {
+				write-logFileUpdates 'no performance tier' -continue
+			}
+			elseif ($wanted -eq 0) {
+				write-logFileUpdates 'clear performance tier' -continue
+			}
+			elseif ($wanted -eq $current) {
 				write-logFileUpdates 'keep performance tier' $_.performanceTierName -continue
 			}
 			else {
-				$_.performanceTierGB = $_.performanceTierGBNew
-				$_.performanceTierName = get-diskTier $_.performanceTierGB $_.SkuName
-				show-paramSetDiskSize $_
 				write-logFileUpdates 'set performance tier' $_.performanceTierName -continue
 			}
 		}
-		# no parameter set
-		elseif ($_.performanceTierGB -eq $_.SizeTierGB) {
-			show-paramSetDiskSize $_
-			write-logFileUpdates 'no performance tier' -continue
+	}
+}
+
+#--------------------------------------------------------------
+function update-paramSetDiskBursting {
+#--------------------------------------------------------------
+	# process RGCOPY parameter
+	set-parameter 'setDiskBursting' $setDiskBursting
+	get-ParameterRule
+	while ($Null -ne $script:paramConfig) {
+
+		test-values 'setDiskBursting' $script:paramConfig @('True','False') 'bursting'
+		$burstingConfig = $script:paramConfig -as [boolean]
+
+		$script:copyDisks.values
+		| Where-Object {$_.Name -in $script:paramDisks}
+		| ForEach-Object {
+
+			$_.BurstingEnabledNew = $burstingConfig
+		}
+		get-ParameterRule
+	}
+
+	# output of changes
+	$script:copyDisks.values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		$current = $_.BurstingEnabled
+		$wanted  = $_.BurstingEnabledNew
+		if ($Null -eq $wanted) {
+			$wanted = $current
+		}
+
+		# check for premium storage
+		if (($_.SkuName -notlike 'Premium_?RS') -and ($wanted -eq $True)) {
+			write-logFileWarning "Disk '$($_.Name)': Bursting is not supported for SKU '$($_.SkuName)'" -stopAtWarning
+			$wanted = $False
+		}
+
+		# check for minimum size
+		if (($_.SizeGB -le 512) -and ($wanted -eq $True)) {
+			write-logFileWarning "Disk '$($_.Name)': Bursting is only supported for disks larger than 512 GiB'" -stopAtWarning
+			$wanted = $False
+		}
+
+		# update
+		if ($current -ne $wanted) {
+			$_.BurstingEnabled = $wanted
+			$action = 'set'
 		}
 		else {
-			show-paramSetDiskSize $_
-			write-logFileUpdates 'keep performance tier' $_.performanceTierName -continue
+			$action = 'keep'
+		}
+		# output
+		if ($_.BurstingEnabled -eq $False) {
+			write-logFileUpdates 'disks' $_.Name "$action disk bursting" $_.BurstingEnabled -defaultValue
+		}
+		else {
+			write-logFileUpdates 'disks' $_.Name "$action disk bursting" $_.BurstingEnabled
 		}
 	}
 }
@@ -3566,26 +4170,21 @@ function update-paramSetDiskCaching {
 	while ($Null -ne $script:paramConfig) {
 
 		$cachingConfig	= $script:paramConfig1
-		$wa				= $script:paramConfig2
-
-		if ($wa -eq 'True')			{ $waEnabledConfig = $True }
-		elseif ($wa -eq 'False')	{ $waEnabledConfig = $False }
-		elseif ($wa.length -eq 0)	{ $waEnabledConfig = $Null }
-		else {
-			write-logFileError "Invalid parameter 'setDiskCaching'" `
-								"value of WriteAcceleratorEnabled: '$wa'" `
-								"Allowed values are: 'True', 'False'"
-		}
-
 		if ($Null -ne $cachingConfig) {
 			test-values 'setDiskCaching' $cachingConfig @('ReadOnly','ReadWrite','None') 'caching'
+		}
+
+		$waEnabledConfig = $script:paramConfig2
+		if ($Null -ne $waEnabledConfig) {
+			test-values 'setDiskCaching' $waEnabledConfig @('True','False') 'writeAccelerator'
+			$waEnabledConfig = $waEnabledConfig -as [boolean]
 		}
 
 		$script:copyDisks.values
 		| Where-Object {$_.Name -in $script:paramDisks}
 		| ForEach-Object {
 
-			if (($Null -ne $cachingConfig) -and ($_.SkuName -ne 'UltraSSD_LRS')) {
+			if ($Null -ne $cachingConfig) {
 				$_.CachingNew = $cachingConfig
 			}
 			if ($Null -ne $waEnabledConfig) {
@@ -3595,99 +4194,127 @@ function update-paramSetDiskCaching {
 		get-ParameterRule
 	}
 
-	# output of changes
-	$script:copyDisks.values
-	| Where-Object Skip -ne $True
-	| Sort-Object Name
-	| ForEach-Object {
-
-		if (($Null -ne $_.CachingNew) -and ($_.CachingNew -ne $_.Caching)) {
-			$_.Caching = $_.CachingNew
-			write-logFileUpdates 'disks' $_.Name 'set caching' $_.Caching -NoNewLine
-		}
-		else {
-			write-logFileUpdates 'disks' $_.Name 'keep caching' $_.Caching -NoNewLine
-		}
-
-		if ($_.skuName -notin @('Premium_LRS', 'UltraSSD_LRS')) {
-			if ($_.WriteAcceleratorEnabled -eq $True) {
-				write-logFileUpdates "disable write accelerator ($($_.SkuName))" -continue
-			}
-			else {
-				write-logFile
-			}
-			$_.WriteAcceleratorEnabled = $False
-		}
-		elseif (($Null -ne $_.WriteAcceleratorEnabledNew) -and ($_.WriteAcceleratorEnabledNew -ne $_.WriteAcceleratorEnabled)) {
-			$_.WriteAcceleratorEnabled = $_.WriteAcceleratorEnabledNew
-			if ($_.WriteAcceleratorEnabled -eq $True) {
-				write-logFileUpdates 'enable write accelerator' -continue
-			}
-			else {
-				write-logFileUpdates 'disable write accelerator' -continue
-			}
-		}
-		else {
-			if ($_.WriteAcceleratorEnabled -eq $True) {
-				write-logFileUpdates "keep write accelerator" "enabled" -continue
-			}
-			else {
-				write-logFileUpdates "keep write accelerator disabled" -continue
-			}
-		}
-	}
-
-	# check consistency
-	if ($skipVmChecks -eq $True) { return }
-
+	# save maximum number of WA disks per VM
 	$script:copyVMs.Values
 	| Where-Object Skip -ne $True
 	| ForEach-Object {
 
-		$vmName = $_.Name
-		$vmSize = $_.VmSize
-		$waMax = $script:vmSkus[$vmSize].MaxWriteAcceleratorDisksAllowed
-		$waCount = 0
+		$_.waMax = $script:vmSkus[$_.VmSize].MaxWriteAcceleratorDisksAllowed
+		$_.waRemaining = $_.waMax
+	}
 
-		# get number of wa disks
-		foreach ($disk in $script:copyDisks.Values) {
-			if ( ($disk.VM -eq $vmName) `
-			-and ($disk.WriteAcceleratorEnabled -eq $True) `
-			-and ($disk.Skip -ne $True)) {
+	# output of changes
+	$script:copyDisks.values
+	| Where-Object Skip -ne $True
+	| Where-Object {$_.VM.length -ne 0}
+	| Sort-Object Name
+	| ForEach-Object {
 
-				$waCount++
+		$vmName = $_.VM
+
+		$current = $_.Caching
+		$wanted  = $_.CachingNew
+		if ($Null -eq $wanted) {
+			$wanted = $current
+		}
+
+		$currentWA = $_.WriteAcceleratorEnabled
+		$wantedWA  = $_.WriteAcceleratorEnabledNew
+		if ($Null -eq $wantedWA) {
+			$wantedWA = $currentWA
+		}
+
+		# no caching for Ultra SSD
+		if (($_.SkuName -eq 'UltraSSD_LRS') -and ($wanted -ne 'None')) {
+			write-logFileWarning "Caching '$wanted' not supported for disk SKU '$($_.SkuName)'" -stopAtWarning
+			$wanted = 'None'
+		}
+
+		# ReadOnly caching not allowed for shared disks
+		if (($_.MaxShares -gt 1) -and ($wanted -eq 'ReadOnly')) {
+			write-logFileWarning "Caching '$wanted' not supported for shared disks" -stopAtWarning
+			$wanted = 'None'
+		}
+
+		# WA only supported for premium disks
+		if (($wantedWA -eq $True) -and ($_.SkuName -notin @('Premium_LRS', 'Premium_ZRS', 'UltraSSD_LRS'))) {
+			write-logFileWarning "Write accelerator not supported for disk SKU '$($_.SkuName)'" -stopAtWarning
+			$wantedWA = $False
+		}	
+
+		# # WA not supported for OS disk ???
+		# if (($wantedWA -eq $True) -and ($_.OsType.length -ne 0) -and !$updateMode) {
+		# 	write-logFileError "Write Accelerator not supported by RGCOPY for OS disks" `
+		# 						"You cannot create a snapshot of an OS disk with Write Accelerator" `
+		# 						"Turn off Write Accelerator using RGCOPY Update Mode first"
+		# }
+
+		# check maximum number of WA disks
+		if ($wantedWA -eq $True) {
+			if ($script:copyVMs[$vmName].waRemaining -gt 0) {
+				$script:copyVMs[$vmName].waRemaining--
+			}
+			else {
+				$waMax  = $script:copyVMs[$vmName].waMax
+				$vmSize = $script:copyVMs[$vmName].VmSize
+				if ($waMax -gt 0) {
+					write-logFileWarning "Size '$vmSize' of VM '$vmName' only supports $waMax write-acceleratored disk(s)" -stopAtWarning
+				}
+				else {
+					write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Write Accelerator" -stopAtWarning
+				}
+				$wantedWA = $False
 			}
 		}
 
-		# check if number of wa disks does not exceed maximum
-		if ($waCount -gt $waMax) {
-			write-logFileError "VM consistency check failed" `
-								"Size '$vmSize' of VM '$vmName' only supports $waMax write-acceleratored disk(s)" `
-								"Use RGCOPY parameter 'setDiskCaching' = '/False' for removing write-accelerator"
+		# correct disk caching for WA
+		if (($wantedWA -eq $True) -and ($wanted -eq 'ReadWrite')) {
+			write-logFileWarning "Caching '$wanted' not supported when write accelerator is enabled" -stopAtWarning
+			$wanted = 'ReadOnly'
+		}
+		
+		# shared disks: disable chaching because current RGCOPY data structures do not support this
+		if ($_.ManagedBy.count -gt 1) {
+			if ($wanted -ne 'None') {
+				$wanted = 'None'
+				write-logFileWarning "RCOPY does not support caching of disks that are attached to more than one VM" -stopAtWarning
+			}
+			if ($wantedWA -ne $False) {
+				$wantedWA = $False
+				write-logFileWarning "RCOPY does not support write accelerator of disks that are attached to more than one VM" -stopAtWarning
+			}
+		}
+		
+		# update
+		if ($current -ne $wanted) {
+			$_.Caching = $wanted
+			$action = 'set'
+		}
+		else {
+			$action = 'keep'
+		}
+		# output
+		if ($_.Caching -eq 'None') {
+			write-logFileUpdates 'disks' $_.Name "$action caching" $_.Caching -defaultValue
+		}
+		else {
+			write-logFileUpdates 'disks' $_.Name "$action caching" $_.Caching
 		}
 
-		# correct caching
-		foreach ($disk in $script:copyDisks.Values) {
-			if ( ($disk.VM -eq $vmName) `
-			-and ($disk.WriteAcceleratorEnabled -eq $True) `
-			-and ($disk.Skip -ne $True)) {
-
-				$diskName = $disk.Name
-				$caching  = $disk.Caching
-
-				# check for OS disk
-				if ($disk.OsType.length -ne 0) {
-					write-logFileWarning "Disk '$diskName' is an OS disk. This is not supported by RGCOPY for write accelerator"
-					$disk.WriteAcceleratorEnabled = $False
-					write-logFileUpdates 'disks' $diskName 'set write accelerator' $false
-				}
-				# correct disk caching
-				elseif ($caching -notin @('ReadOnly', 'None')) {
-					write-logFileWarning "Cache type '$caching' of disk '$diskName' not supported by write accelerator"
-					$disk.Caching = 'ReadOnly'
-					write-logFileUpdates 'disks' $diskName 'set caching' 'ReadOnly'
-				}
-			}
+		# update
+		if ($currentWA -ne $wantedWA) {
+			$_.WriteAcceleratorEnabled = $wantedWA
+			$action = 'set'
+		}
+		else {
+			$action = 'keep'
+		}
+		# output
+		if ($_.WriteAcceleratorEnabled -eq $False) {
+			write-logFileUpdates 'disks' $_.Name "$action write accelerator" $_.WriteAcceleratorEnabled -defaultValue
+		}
+		else {
+			write-logFileUpdates 'disks' $_.Name "$action write accelerator" $_.WriteAcceleratorEnabled
 		}
 	}
 }
@@ -3695,53 +4322,16 @@ function update-paramSetDiskCaching {
 #--------------------------------------------------------------
 function update-paramSetAcceleratedNetworking {
 #--------------------------------------------------------------
-	$vmSizeMaxNIC1 = @(
-		'Standard_DS1_v2',
-		'Standard_D1_v2',
-		'Standard_D2_v3',
-		'Standard_D2s_v3',
-		'Standard_D2_v4',
-		'Standard_D2s_v4',
-		'Standard_D2a_v4',
-		'Standard_D2as_v4',
-		'Standard_D2d_v4',
-		'Standard_D2ds_v4',
-		'Standard_E2_v3',
-		'Standard_E2s_v3',
-		'Standard_E2a_v4',
-		'Standard_E2as_v4',
-		'Standard_E2d_v4',
-		'Standard_E2ds_v4',
-		'Standard_E2_v4',
-		'Standard_E2s_v4',
-		'Standard_F2s_v2'
-	)
-
-	$vmSizeMaxNIC2 = @(
-		'Standard_D2_v5',
-		'Standard_D2s_v5',
-		'Standard_D2d_v5',
-		'Standard_D2ds_v5',
-		'Standard_E2_v5',
-		'Standard_E2s_v5',
-		'Standard_E2d_v5',
-		'Standard_E2ds_v5'
-	)
-
 	# process RGCOPY parameter
 	set-parameter 'setAcceleratedNetworking' $setAcceleratedNetworking
 	get-ParameterRule
 	while ($Null -ne $script:paramConfig) {
 
-		if     ($script:paramConfig -eq 'True')		{ $acceleratedNW = $True }
-		elseif ($script:paramConfig -eq 'False')	{ $acceleratedNW = $False }
-		else {
-			write-logFileError "Invalid parameter '$script:paramName'" `
-								"value: '$($script:paramConfig)', allowed: {'True', 'False'}"
-		}
+		test-values 'setAcceleratedNetworking' $script:paramConfig @('True','False') 'AcceleratedNetworking'
+		$acceleratedNW = $script:paramConfig -as [boolean]
 
 		$script:copyNICs.values
-		| Where-Object {$_.NicName -in $script:paramNICs}
+		| Where-Object {$_.NicNameNew -in $script:paramNICs}
 		| ForEach-Object {
 
 			$_.EnableAcceleratedNetworkingNew = $acceleratedNW
@@ -3749,17 +4339,67 @@ function update-paramSetAcceleratedNetworking {
 		get-ParameterRule
 	}
 
-	# process order
-	$processNICs =  convertTo-array ($script:copyNICs.values | Where-Object {$False -eq $_.EnableAcceleratedNetworkingNew})
-	$processNICs += convertTo-array ($script:copyNICs.values | Where-Object {$Null  -eq $_.EnableAcceleratedNetworkingNew})
-	$processNICs += convertTo-array ($script:copyNICs.values | Where-Object {$True  -eq $_.EnableAcceleratedNetworkingNew})
-
-	# output of changes
-	$processNICs
+	# save maximum number of acc NICs per VM
+	$script:copyVMs.Values
+	| Where-Object Skip -ne $True
 	| ForEach-Object {
 
-		$nicName	= $_.NicName
+		$vmSize = $_.VmSize
+
+		if ($vmSize -in @(
+					'Standard_DS1_v2',
+					'Standard_D1_v2',
+					'Standard_D2_v3',
+					'Standard_D2s_v3',
+					'Standard_D2_v4',
+					'Standard_D2s_v4',
+					'Standard_D2a_v4',
+					'Standard_D2as_v4',
+					'Standard_D2d_v4',
+					'Standard_D2ds_v4',
+					'Standard_E2_v3',
+					'Standard_E2s_v3',
+					'Standard_E2a_v4',
+					'Standard_E2as_v4',
+					'Standard_E2d_v4',
+					'Standard_E2ds_v4',
+					'Standard_E2_v4',
+					'Standard_E2s_v4',
+					'Standard_F2s_v2') `
+		) {
+			$accNwMax = 1
+		}
+		elseif ($vmSize -in @(
+					'Standard_D2_v5',
+					'Standard_D2s_v5',
+					'Standard_D2d_v5',
+					'Standard_D2ds_v5',
+					'Standard_E2_v5',
+					'Standard_E2s_v5',
+					'Standard_E2d_v5',
+					'Standard_E2ds_v5') `
+		) {
+			$accNwMax = 2
+		}
+		elseif ($script:vmSkus[$vmSize].AcceleratedNetworkingEnabled -eq $True) {
+			$accNwMax = 9999
+		}
+		else {
+			$accNwMax = 0
+		}
+
+		$_.accNwMax       = $accNwMax
+		$_.accNwRemaining = $accNwMax
+	}
+
+	# output of changes
+	$script:copyNICs.values
+	| Sort-Object NicNameNew
+	| ForEach-Object {
+
+		$nicName	= $_.NicNameNew
 		$vmName		= $_.VmName
+
 		$current	= $_.EnableAcceleratedNetworking
 		$wanted		= $_.EnableAcceleratedNetworkingNew
 		if ($Null -eq $wanted) {
@@ -3769,88 +4409,43 @@ function update-paramSetAcceleratedNetworking {
 		# NIC not attached
 		if ($vmName.length -eq 0) {
 			write-logFileWarning "NIC '$nicName' not attached to a VM"
-			write-logFileUpdates 'networkInterfaces' $nicName 'keep Accelerated Networking' $current
 		}
 		# NIC attached
 		else {
-			$nicCount		= $script:copyVMs[$vmName].NicCount
-			$nicCountAccNw	= $script:copyVMs[$vmName].NicCountAccNw
-			$vmSize			= $script:copyVMs[$vmName].VmSize
-			$allowed		= $script:vmSkus[$vmSize].AcceleratedNetworkingEnabled
-			if ($Null -eq $allowed) {
-				write-logFileWarning "Could not get property 'AcceleratedNetworkingEnabled' of VM SKU '$vmSize'"
-				$allowed = $True
-			}
 
-			# calculate number of NICs that can additionally use AccNw
-			if ($allowed -eq $False) {
-				$available = 0
-				$_.VmRestrictions = $True # AccNw must always be turned off BEFORE updating VM size
-			}
-			elseif ($vmSize -in $vmSizeMaxNIC1) {
-				$warning = "Accelerated networking can only be applied to a single NIC for size '$vmSize' of VM '$vmName'"
-				$available = 1 - $nicCountAccNw
-				if ($nicCount -gt 1) {
-					$_.VmRestrictions = $True # AccNw must always be turned off BEFORE updating VM size
-				}
-			}
-			elseif ($vmSize -in $vmSizeMaxNIC2) {
-				$warning = "Accelerated networking can only be applied to two NICs for size '$vmSize' of VM '$vmName'"
-				$available = 2 - $nicCountAccNw
-				if ($nicCount -gt 2) {
-					$_.VmRestrictions = $True # AccNw must always be turned off BEFORE updating VM size
-				}
-			}
-			else {
-				$available = 9999
-			}
-
-			# keep AccNW off
-			if (($wanted -eq $False) -and ($current -eq $False)) {
-				write-logFileUpdates 'networkInterfaces' $nicName 'keep Accelerated Networking' $False
-			}
-			# turn AccNW off
-			elseif (($wanted -eq $False) -and ($current -eq $True)) {
-				$script:copyVMs[$vmName].NicCountAccNw--
-				$_.EnableAcceleratedNetworking = $False
-				write-logFileUpdates 'networkInterfaces' $nicName 'set Accelerated Networking' $False
-			}
-			# keep AccNW on
-			elseif ($current -eq $True) {
-
-				if ($allowed -eq $False) {
-					write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Accelerated Networking"
-					$script:copyVMs[$vmName].NicCountAccNw--
-					$_.EnableAcceleratedNetworking = $False
-					write-logFileUpdates 'networkInterfaces' $nicName 'set Accelerated Networking' $False
-				}
-				elseif ($available -lt 0) {
-					write-logFileWarning $warning
-					$script:copyVMs[$vmName].NicCountAccNw--
-					$_.EnableAcceleratedNetworking = $False
-					write-logFileUpdates 'networkInterfaces' $nicName 'set Accelerated Networking' $False
+			# check maximum number of acc NICs
+			if ($wanted -eq $True) {
+				if ($script:copyVMs[$vmName].accNwRemaining -gt 0) {
+					$script:copyVMs[$vmName].accNwRemaining--
 				}
 				else {
-					write-logFileUpdates 'networkInterfaces' $nicName 'keep Accelerated Networking' $True
+					$accNwMax = $script:copyVMs[$vmName].accNwMax
+					$vmSize   = $script:copyVMs[$vmName].VmSize
+					if ($accNwMax -gt 0) {
+						write-logFileWarning "Size '$vmSize' of VM '$vmName' only supports $accNwMax NICs with Accelerated Networking" -stopAtWarning
+					}
+					else {
+						write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Accelerated Networking" -stopAtWarning
+					}
+					$wanted = $False
 				}
 			}
-			# turn AccNW on
-			else {
+		}
 
-				if ($allowed -eq $False) {
-					write-logFileWarning "Size '$vmSize' of VM '$vmName' does not support Accelerated Networking"
-					write-logFileUpdates 'networkInterfaces' $nicName 'keep Accelerated Networking' $False
-				}
-				elseif ($available -lt 1) {
-					write-logFileWarning $warning
-					write-logFileUpdates 'networkInterfaces' $nicName 'keep Accelerated Networking' $False
-				}
-				else {
-					$script:copyVMs[$vmName].NicCountAccNw++
-					$_.EnableAcceleratedNetworking = $True
-					write-logFileUpdates 'networkInterfaces' $nicName 'set Accelerated Networking' $True
-				}
-			}
+		# update
+		if ($current -ne $wanted) {
+			$_.EnableAcceleratedNetworking = $wanted
+			$action = 'set'
+		}
+		else {
+			$action = 'keep'
+		}
+		# output
+		if ($_.EnableAcceleratedNetworking -eq $False) {
+			write-logFileUpdates 'networkInterfaces' $nicName "$action Accelerated Networking" $_.EnableAcceleratedNetworking -defaultValue
+		}
+		else {
+			write-logFileUpdates 'networkInterfaces' $nicName "$action Accelerated Networking" $_.EnableAcceleratedNetworking
 		}
 	}
 }
@@ -3896,8 +4491,7 @@ function new-SnapshotsVolumes {
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	$script:snapshotList.Values
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileError "Creation of NetApp snapshots failed"
 	}
@@ -3965,8 +4559,7 @@ function new-snapshots {
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileError "Creation of snapshots failed"
 	}
@@ -3985,7 +4578,9 @@ function new-snapshots {
 #--------------------------------------------------------------
 function remove-snapshots {
 #--------------------------------------------------------------
-	param (	$snapshots )
+	param (
+		$snapshots
+	)
 
 	# using parameters for parallel execution
 	$scriptParameter = "`$sourceRG = '$sourceRG';"
@@ -4023,8 +4618,7 @@ function remove-snapshots {
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	$snapshots
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileError "Deletion of snapshot failed"
 	}
@@ -4038,7 +4632,7 @@ function remove-snapshots {
 function grant-access {
 #--------------------------------------------------------------
 	# get access token for snapshots
-	if ($useBlobsFromDisk -eq $False) {
+	if (!$useBlobsFromDisk) {
 
 		# using parameters for parallel execution
 		$scriptParameter =  "`$snapshotExtension = '$snapshotExtension';"
@@ -4069,8 +4663,7 @@ function grant-access {
 		$script:copyDisks.Values
 		| Where-Object Skip -ne $True
 		| ForEach-Object @param
-		| Tee-Object -FilePath $logPath -append
-		| Out-Host
+		| write-LogFilePipe
 		if (!$?) {
 			write-logFileError "Grant Access to snapshot failed"
 		}
@@ -4107,8 +4700,7 @@ function grant-access {
 		$script:copyDisks.Values
 		| Where-Object Skip -ne $True
 		| ForEach-Object @param
-		| Tee-Object -FilePath $logPath -append
-		| Out-Host
+		| write-LogFilePipe
 		if (!$?) {
 			write-logFileError "Grant Access to disk failed"
 		}
@@ -4143,8 +4735,7 @@ function revoke-access {
 		$script:copyDisks.Values
 		| Where-Object Skip -ne $True
 		| ForEach-Object @param
-		| Tee-Object -FilePath $logPath -append
-		| Out-Host
+		| write-LogFilePipe
 		if (!$?) {
 			write-logFileError "Revoke of disk access failed"
 		}
@@ -4153,7 +4744,7 @@ function revoke-access {
 		write-logFileError "Revoke-AzDiskAccess failed" `
 							"If Azure credentials have expired then run Connect-AzAccount" `
 							"and restart RGCOPY with ADDITIONAL parameter 'restartBlobs'" `
-							$error[0]
+							-lastError
 	}
 	write-actionEnd
 }
@@ -4161,9 +4752,11 @@ function revoke-access {
 #--------------------------------------------------------------
 function get-saKey {
 #--------------------------------------------------------------
-	param (	$mySub,
-			$myRG,
-			$mySA)
+	param (
+		$mySub,
+		$myRG,
+		$mySA
+	)
 
 	$savedSub = $script:currentSub
 	set-context $mySub # *** CHANGE SUBSCRIPTION **************
@@ -4218,8 +4811,7 @@ function start-copyBlobs {
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileError "Creation of Storage Account BLOB failed"
 	}
@@ -4266,8 +4858,7 @@ function stop-copyBlobs {
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileError "Stop Copy Disk failed"
 	}
@@ -4326,7 +4917,7 @@ function wait-copyBlobs {
 					write-logFileError "Get-AzStorageBlob failed" `
 										"If Azure credentials have expired then run Connect-AzAccount" `
 										"and restart RGCOPY with ADDITIONAL parameter 'restartBlobs'" `
-										$error[0]
+										-lastError
 				}
 
 				[int] $GB_copied = $state.BytesCopied / 1024 / 1024 / 1024
@@ -4358,7 +4949,7 @@ function wait-copyBlobs {
 
 		if (!$done) { Start-Sleep -seconds $waitBlobsTimeSec }
 	} while (!$done)
-	if ($archiveMode -ne $True) {
+	if (!$archiveMode) {
 		# calculate total size of copied BLOBs
 		$script:totalBlobSize = 0
 		$script:copyDisks.Values
@@ -4515,7 +5106,6 @@ function update-SKUs {
 			if ($old -ne $value) {
 				write-logFileUpdates 'publicIPAddresses' $_.name 'set SKU' $value
 				$_.sku = @{ name = $value }
-				$script:countPublicIpSku++
 			}
 			else {
 				write-logFileUpdates 'publicIPAddresses' $_.name 'keep SKU' $value
@@ -4551,7 +5141,6 @@ function update-IpAllocationMethod {
 			if ($_.properties.publicIPAllocationMethod -ne $value) {
 				$_.properties.publicIPAllocationMethod = $value
 				write-logFileUpdates 'publicIPAddresses' $_.name 'set Allocation Method' $value
-				$script:countPublicIpAlloc++
 			}
 			else {
 				write-logFileUpdates 'publicIPAddresses' $_.name 'keep Allocation Method' $value
@@ -4731,7 +5320,7 @@ function update-dependenciesLB {
 		}
 
 		# save modified NICs (with unmodified properties)
-		if ($changed -eq $True) {
+		if ($changed) {
 			$script:resourcesNic += $NIC
 		}
 	}
@@ -4774,7 +5363,7 @@ function update-dependenciesLB {
 		}
 
 		# save LBs
-		if ($changed -eq $True) {
+		if ($changed) {
 			$script:resourcesLB += $LB
 		}
 	}
@@ -4967,7 +5556,7 @@ function new-proximityPlacementGroup {
 	}
 
 	# remove all ProximityPlacementGroups
-	if ($skipProximityPlacementGroup -eq $True) {
+	if ($skipProximityPlacementGroup) {
 
 		# remove PPGs
 		$script:resourcesALL
@@ -5054,7 +5643,7 @@ function new-availabilitySet {
 
 	#--------------------------------------------------------------
 	# remove all availabilitySets
-	if ($skipAvailabilitySet -eq $True) {
+	if ($skipAvailabilitySet) {
 		$script:resourcesALL
 		| Where-Object type -eq 'Microsoft.Compute/availabilitySets'
 		| ForEach-Object {
@@ -5087,7 +5676,7 @@ function new-availabilitySet {
 
 			if (($asName -like 'rgcopy.tipGroup*') `
 			-or ($createAvailabilitySet.count -ne 0) `
-			-or ($skipAvailabilitySet -eq $True)) {
+			-or $skipAvailabilitySet ) {
 
 				write-logFileUpdates 'virtualMachines' $_.name 'remove availabilitySet'
 				$_.properties.availabilitySet = $Null
@@ -5216,7 +5805,7 @@ function update-availabilitySet {
 
 	#--------------------------------------------------------------
 	# fault domain count
-	if ($skipVmChecks -ne $True) {
+	if (!$skipVmChecks) {
 		# get maximun
 		$script:setFaultDomainCount = 2
 		$sku = (Get-AzComputeResourceSku `
@@ -5241,7 +5830,7 @@ function update-availabilitySet {
 		| ForEach-Object -Process {
 
 			if ($_.properties.platformFaultDomainCount -gt $valueInt ) {
-				write-logFileWarning "The maximum fault domain count of availability sets in region '$targetLocation' is $valueInt"
+				write-logFileWarning "The maximum fault domain count of availability sets in region '$targetLocation' is $valueInt" -stopAtWarning
 				$_.properties.platformFaultDomainCount = $valueInt
 				write-logFileUpdates 'availabilitySets' $_.name 'set faultDomainCount' $valueInt
 			}
@@ -5323,13 +5912,21 @@ function update-proximityPlacementGroup {
 		}
 	}
 
-	# warning
+	# make sure that VMs are deployed in right order
 	foreach ($ppg in $allPPGs.Values) {
 		if (($ppg.vmsZone.count -ne 0) -and ($ppg.vmsOther.count -ne 0)) {
-			write-logFileWarning "Some VMs of proximity placement group '$($ppg.name)' are using zones, some not"
-			write-logFile "Use RGCOPY parameter 'setVmDeploymentOrder' to:"
-			write-logFile " firstly,  create VMs: $($ppg.vmsZone)"
-			write-logFile " secondly, create VMs: $($ppg.vmsOther)"
+			if ('setVmDeploymentOrder' -in $boundParameterNames) {
+				write-logFileWarning "Some VMs of proximity placement group '$($ppg.name)' are using zones, some not" `
+										"Use RGCOPY parameter 'setVmDeploymentOrder' to:" `
+										" firstly,  create VMs: $($ppg.vmsZone)" `
+										" secondly, create VMs: $($ppg.vmsOther)"
+			}
+			else {
+				write-logFileError "Some VMs of proximity placement group '$($ppg.name)' are using zones, some not" `
+									"Use RGCOPY parameter 'setVmDeploymentOrder' to:" `
+									" firstly,  create VMs: $($ppg.vmsZone)" `
+									" secondly, create VMs: $($ppg.vmsOther)"
+			}
 		}
 	}
 }
@@ -5437,13 +6034,10 @@ function update-vmSize {
 	| ForEach-Object -Process {
 
 		$vmName = $_.name
-		$vmSize = $script:copyVMs[$vmName].VmSize
-		$vmCpus = 0
-		$MemoryGB = 0
-		if ($Null -ne $script:vmSkus[$vmSize]) {
-			$vmCpus   = $script:vmSkus[$vmSize].vCPUs
-			$MemoryGB = $script:vmSkus[$vmSize].MemoryGB
-		}
+		$vmSize   = $script:copyVMs[$vmName].VmSize
+		$vmCpus   = $script:vmSkus[$vmSize].vCPUs
+		$MemoryGB = $script:vmSkus[$vmSize].MemoryGB
+
 		# vnName might contain special characters that are not allowed as variable name
 		$name = $vmName -replace '[^A-Za-z0-9]', ''
 
@@ -5517,7 +6111,7 @@ function update-vmDisks {
 		# remove ultraSSDEnabled
 		if ($_.properties.additionalCapabilities.ultraSSDEnabled -eq $True) {
 			$_.properties.additionalCapabilities.ultraSSDEnabled = $False
-			write-logFileUpdates 'virtualMachines' $vmName 'delete Ultra SSD support'
+			write-logFileUpdates 'virtualMachines' $_.name 'delete Ultra SSD support'
 		}
 	}
 }
@@ -5533,7 +6127,7 @@ function update-vmBootDiagnostics {
 		# remove old dependencies to storage accounts
 		$_.dependsOn = remove-dependencies $_.dependsOn 'Microsoft.Storage/StorageAccounts*'
 
-		if ($enableBootDiagnostics -ne $True) {
+		if (!$enableBootDiagnostics) {
 			# delete bootDiagnostics
 			if ($Null -ne $_.properties.diagnosticsProfile) {
 				write-logFileUpdates 'virtualMachines' $vmName 'delete bootDiagnostics'
@@ -5549,7 +6143,7 @@ function update-vmBootDiagnostics {
 				}
 			}
 			write-logFileUpdates 'virtualMachines' $vmName 'set bootDiagnostics URI' 'https://' '<storageAccountName>' '.blob.core.windows.net'
-			if ($useBlobs -ne $True) {
+			if (!$useBlobs) {
 				[array] $_.dependsOn += get-resourceFunction `
 											'Microsoft.Storage' `
 											'storageAccounts'	"parameters('storageAccountName')" `
@@ -5612,7 +6206,7 @@ function update-vmPriority {
 #--------------------------------------------------------------
 function update-vmExtensions {
 #--------------------------------------------------------------
-	if ($skipExtensions -eq $True) { return }
+	if ($skipExtensions) { return }
 
 	$script:copyVMs.values
 	| Where-Object Skip -ne $True
@@ -5768,7 +6362,7 @@ function update-newDisks {
 				# create disk
 				$disk = @{
 					type 			= 'Microsoft.Compute/disks'
-					apiVersion		= '2020-09-30'
+					apiVersion		= '2021-08-01'
 					name 			= $diskName
 					location		= $targetLocation
 					sku				= @{ name = $skuName }
@@ -5830,7 +6424,6 @@ function update-newDisks {
 #--------------------------------------------------------------
 function update-disks {
 #--------------------------------------------------------------
-
 	# create disks
 	$script:copyDisks.Values
 	| ForEach-Object {
@@ -5845,12 +6438,10 @@ function update-disks {
 		}
 		else {
 			# creation from snapshot
-			if ($useBlobs -ne $True) {
+			if (!$useBlobs) {
 				$from = 'snapshot'
 				$snapshotName = "$diskName.$snapshotExtension"
-				if ( ($skipSnapshots -eq $True) `
-				-and ($snapshotName -notin $script:snapshotNames) `
-				-and ($justRedeployAms -ne $True) ) {
+				if ( $skipSnapshots -and !$justRedeployAms -and ($snapshotName -notin $script:snapshotNames)) {
 					write-logFileError "Snapshot '$snapshotName' not found" `
 										"Remove parameter 'skipSnapshots'"
 				}
@@ -5889,12 +6480,14 @@ function update-disks {
 			if ($_.performanceTierName.length -ne 0)	{ $properties.Add('tier', $_.performanceTierName) }
 			if ($_.OsType.count -ne 0)					{ $properties.Add('osType', $_.OsType) }
 			if ($_.HyperVGeneration.length -ne 0)		{ $properties.Add('hyperVGeneration', $_.HyperVGeneration) }
+			if ($_.BurstingEnabled -eq $True)			{ $properties.Add('burstingEnabled', $True) }
+			if ($_.MaxShares -gt 1)						{ $properties.Add('maxShares', $_.MaxShares) }
 
 			# disk object
 			$sku = @{ name = $_.SkuName }
 			$disk = @{
 				type 			= 'Microsoft.Compute/disks'
-				apiVersion		= '2020-09-30'
+				apiVersion		= '2021-08-01'
 				name 			= $diskName
 				location		= $targetLocation
 				sku				= $sku
@@ -5922,9 +6515,7 @@ function update-disks {
 #--------------------------------------------------------------
 function update-storageAccount {
 #--------------------------------------------------------------
-	if (($enableBootDiagnostics -ne $True) -or ($useBlobs -eq $True)) {
-		 return 
-	}
+	if (!$enableBootDiagnostics -or $useBlobs) { return }
 
 	[array] $dependsSa = get-resourceFunction `
 							'Microsoft.Storage' `
@@ -6101,7 +6692,7 @@ function update-images {
 #--------------------------------------------------------------
 function update-bastion {
 #--------------------------------------------------------------
-	if (($skipBastion -ne $True) -and ($targetLocationDisplayName -ne 'Canary' )) {
+	if (!$skipBastion -and ($targetLocationDisplayName -ne 'Canary' )) {
 		return
 	}
 
@@ -6361,11 +6952,13 @@ function update-netApp {
 #--------------------------------------------------------------
 function rename-any {
 #--------------------------------------------------------------
-	param (	$nameOld,
-			$nameNew,
-			$resourceArea,
-			$mainResourceType,
-			$subResourceType)
+	param (
+		$nameOld,
+		$nameNew,
+		$resourceArea,
+		$mainResourceType,
+		$subResourceType
+	)
 
 	$a,$b = $nameOld -split '/'
 	$resourceOld = get-resourceFunction `
@@ -6499,7 +7092,7 @@ function update-mergeIPs {
 		}
 
 		# save VMs with IP
-		if ($script:hasIP -eq $True) {
+		if ($script:hasIP) {
 			$script:mergeVMwithIP += $_.name
 		}
 	}
@@ -6562,13 +7155,7 @@ function update-merge {
 
 		# check if accelerated networking is enabled
 		$vmSize = $_.VmSize
-		$enableAccNW = $True
-		if ($Null -eq $script:vmSkus[$vmSize]) {
-			write-logFileError "Error checking VM SKU '$vmSize'"
-		}
-		elseif ($script:vmSkus[$vmSize].AcceleratedNetworkingEnabled -eq $False) {
-			$enableAccNW = $False
-		}
+		$enableAccNW = $script:vmSkus[$vmSize].AcceleratedNetworkingEnabled
 
 		#--------------------------------------------------------------
 		# update VM
@@ -6712,11 +7299,12 @@ function update-merge {
 #--------------------------------------------------------------
 function test-resourceInTargetRG {
 #--------------------------------------------------------------
-	param (	$resType,
-			$resFunction,
-			$resNames,
-			$mustExist)
-
+	param (
+		$resType,
+		$resFunction,
+		$resNames,
+		$mustExist
+	)
 
 	$param = @{
 		ResourceGroupName	= $targetRG
@@ -6753,7 +7341,7 @@ function test-resourceInTargetRG {
 	test-azResult $resFunction  "Could not get $resTypeName of resource group '$targetRG'"
 		
 	foreach ($resName in $resNames) {
-		if ($mustExist -eq $True) {
+		if ($mustExist) {
 			if ($resName -notin $targetResources.Name) {
 				write-logFileError "Invalid parameters 'setVmMerge' $paramName" `
 									"$resType '$resName' does not exist in resource group '$targetRG'"
@@ -6773,7 +7361,14 @@ function test-resourceInTargetRG {
 #--------------------------------------------------------------
 function add-greenlist {
 #--------------------------------------------------------------
-	param (	$level1, $level2, $level3, $level4, $level5, $level6)
+	param (
+		$level1,
+		$level2,
+		$level3,
+		$level4,
+		$level5,
+		$level6
+	)
 
 	$script:greenlist."$level1  $level2  $level3  $level4  $level5  $level6" = $True
 }
@@ -7049,7 +7644,9 @@ function new-greenlist {
 #--------------------------------------------------------------
 function test-greenlistSingle {
 #--------------------------------------------------------------
-	param (	[array] $level)
+	param (
+		[array] $level
+	)
 
 	$level1 = $level[0]
 	$level2 = $level[1]
@@ -7095,9 +7692,11 @@ function test-greenlistSingle {
 #--------------------------------------------------------------
 function test-greenlistAll {
 #--------------------------------------------------------------
-	param (	[ref] $reference,
-			[string] $objectKey,
-			[array] $level)
+	param (
+		[ref] $reference,
+		[string] $objectKey,
+		[array] $level
+	)
 
 	if ($level.count -gt 20) {
 		# This cannot happen without changing RGCOPY source code
@@ -7176,7 +7775,7 @@ function test-greenlistAll {
 #--------------------------------------------------------------
 function compare-greenlist {
 #--------------------------------------------------------------
-	if ($skipGreenlist -eq $True) { return }
+	if ($skipGreenlist) { return }
 
 	new-greenlist
 
@@ -7202,18 +7801,18 @@ function compare-greenlist {
 	[console]::ForegroundColor = 'DarkGray'
 	$script:deniedProperties.GetEnumerator()
 	| Sort-Object Key
-	| Select-Object @{label="Excluded resource properties (ignored by RGCOPY)"; expression={$_.Key}}
+	| Select-Object `
+		@{label="Excluded resource properties (ignored by RGCOPY)"; expression={$_.Key}}
 	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 
 	# outout of kept properties
 	$script:allowedProperties.GetEnumerator()
 	| Sort-Object Key
-	| Select-Object @{label="Included resources (processed by RGCOPY)"; expression={$_.Key}}
+	| Select-Object `
+		@{label="Included resources (processed by RGCOPY)"; expression={$_.Key}}
 	| Format-Table
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 
 	# restore colors
 	[console]::ForegroundColor = 'Gray'
@@ -7222,8 +7821,10 @@ function compare-greenlist {
 #--------------------------------------------------------------
 function remove-rgcopySpaces {
 #--------------------------------------------------------------
-	param ( 	$key,
-			$value)
+	param (
+		$key,
+		$value
+	)
 
 	# convert to string
 	$string = $value -as [string]
@@ -7267,7 +7868,7 @@ function set-rgcopyParam {
 	}
 
 	# add deploy Parameters
-	get-deployParameters
+	get-deployParameters -check $False
 	if ($null -ne $script:deployParameters) {
 		$script:deployParameters.keys
 		| ForEach-Object{
@@ -7319,12 +7920,14 @@ function set-rgcopyParam {
 function invoke-localScript {
 #--------------------------------------------------------------
 	# script running locally for modifying sourceRG
-	param (	$pathScript,
-			$variableScript)
+	param (
+		$pathScript,
+		$variableScript
+	)
 
 	write-actionStart "Run Script from `$$variableScript"
 
-	if ($(Test-Path -Path $pathScript) -eq $False) {
+	if ($(Test-Path -Path $pathScript) -ne $True) {
 		write-logFileWarning  "File not found. Script '$pathScript' not executed"
 		write-actionEnd
 		return
@@ -7356,8 +7959,7 @@ function invoke-localScript {
 
 	# invoke script with position parameters
 	Invoke-Command -Script $script -ErrorAction 'SilentlyContinue' -ArgumentList $values
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	test-azResult 'Invoke-Command'  "Local PowerShell script '$pathScript' failed"
 
 	write-actionEnd
@@ -7366,9 +7968,11 @@ function invoke-localScript {
 #--------------------------------------------------------------
 function wait-vmAgent {
 #--------------------------------------------------------------
-	param(	$resourceGroup,
-			$scriptServer,
-			$pathScript)
+	param (
+		$resourceGroup,
+		$scriptServer,
+		$pathScript
+	)
 
 	for ($i = 1; $i -le $vmAgentWaitMinutes; $i++) {
 
@@ -7392,7 +7996,7 @@ function wait-vmAgent {
 			write-logFile -ForegroundColor DarkGray "VM Agent version:    $version"
 
 			# check minimum version 2.2.10
-			if ($skipVmChecks -ne $True) {
+			if (!$skipVmChecks) {
 				$v = $version -split '\.'
 				if ($v.count -ge 3) {
 					if ( (($v[0] -as [int]) -lt 2) `
@@ -7424,9 +8028,11 @@ function wait-vmAgent {
 function invoke-vmScript {
 #--------------------------------------------------------------
 # execute script (either path to file on VM or OS command)
-	param (	$pathScript,
-			$variableScript,
-			$resourceGroup)
+	param (
+		$pathScript,
+		$variableScript,
+		$resourceGroup
+	)
 
 	write-actionStart "Run Script from `$$variableScript"
 
@@ -7480,7 +8086,7 @@ function invoke-vmScript {
 	# local or remote location of script?
 	if ($scriptName -like 'local:*') {
 		$localScriptName = $scriptName.Substring(6,$scriptName.length -6)
-		if ($(Test-Path -Path $localScriptName) -eq $False) {
+		if ($(Test-Path -Path $localScriptName) -ne $True) {
 			write-logFileError "Invalid parameter '$variableScript'" `
 								"Local script not found: '$localScriptName'"
 		}
@@ -7501,7 +8107,7 @@ function invoke-vmScript {
 	}
 
 	# wait for all services inside VMs to be started
-	if ($script:vmStartWaitDone -ne $True) {
+	if (!$script:vmStartWaitDone) {
 
 		# Only wait once (for each resource group). Do not wait a second time when running the second script.
 		$script:vmStartWaitDone = $True
@@ -7547,8 +8153,10 @@ function invoke-vmScript {
 #--------------------------------------------------------------
 function remove-hashProperties {
 #--------------------------------------------------------------
-	param (	$hashTable,
-			$supportedKeys )
+	param (
+		$hashTable,
+		$supportedKeys
+	)
 
 	$removedKeys = @()
 	foreach ($key in $hashTable.keys) {
@@ -7565,7 +8173,9 @@ function remove-hashProperties {
 #--------------------------------------------------------------
 function update-remoteSubnets {
 #--------------------------------------------------------------
-	param (	$resourceGroup)
+	param (
+		$resourceGroup
+	)
 
 	$script:remoteResources
 	| Where-Object type -eq 'Microsoft.Network/virtualNetworks/subnets'
@@ -7593,7 +8203,9 @@ function update-remoteSubnets {
 #--------------------------------------------------------------
 function update-remoteVNETs {
 #--------------------------------------------------------------
-	param (	$resourceGroup)
+	param (
+		$resourceGroup
+	)
 
 	$remainingSubnetNames = @()
 
@@ -7650,7 +8262,9 @@ function update-remoteVNETs {
 #--------------------------------------------------------------
 function update-remoteNICs {
 #--------------------------------------------------------------
-	param (	$resourceGroup)
+	param (
+		$resourceGroup
+	)
 
 	$script:remoteResources
 	| Where-Object type -eq 'Microsoft.Network/networkInterfaces'
@@ -7684,6 +8298,7 @@ function update-remoteNICs {
 		$nicName = $_.name
 		$resKey = "networkInterfaces/$resourceGroup/$nicName"
 		$_.name = $script:remoteNames[$resKey].newName
+		$dependsOn = @()
 
 		# new VNET name
 		foreach ($conf in $_.properties.ipConfigurations) {
@@ -7702,19 +8317,26 @@ function update-remoteNICs {
 			$resKey = "virtualNetworks/$resourceGroup/$vnet"
 			$vnetNew = $script:remoteNames[$resKey].newName
 
-			$conf.properties.subnet.id = get-resourceFunction `
-											'Microsoft.Network' `
-											'virtualNetworks'	$vnetNew `
-											'subnets'			$subnet
+			$subnetID = get-resourceFunction `
+							'Microsoft.Network' `
+							'virtualNetworks'	$vnetNew `
+							'subnets'			$subnet
+
+			$conf.properties.subnet.id = $subnetID
+			$dependsOn += $subnetID
 		}
+
+		$_.dependsOn = $dependsOn
 	}
 }
 
 #--------------------------------------------------------------
 function update-remoteSourceIP {
 #--------------------------------------------------------------
-	param (	$resourceType,
-			$configName )
+	param (
+		$resourceType,
+		$configName
+	)
 
 	# networkInterfaces / loadBalancers / bastionHosts
 	$script:resourcesALL
@@ -7896,18 +8518,14 @@ function new-templateTarget {
 	$script:countDiskSku				= 0
 	$script:countVmZone					= 0
 	$script:countLoadBalancerSku		= 0
-	$script:countPublicIpSku			= 0
-	$script:countPublicIpAlloc			= 0
 	$script:countPrivateIpAlloc			= 0
 	$script:countAcceleratedNetworking	= 0
 	# do not count modifications if parameter was supplied explicitly
-	if('setDiskSku'					-in $boundParameterNames) { $script:countDiskSku				= -999999}
-	if('setVmZone'					-in $boundParameterNames) { $script:countVmZone					= -999999}
-	if('setLoadBalancerSku'			-in $boundParameterNames) { $script:countLoadBalancerSku		= -999999}
-	if('setPublicIpSku'				-in $boundParameterNames) { $script:countPublicIpSku			= -999999}
-	if('setPublicIpAlloc'			-in $boundParameterNames) { $script:countPublicIpAlloc			= -999999}
-	if('setPrivateIpAlloc'			-in $boundParameterNames) { $script:countPrivateIpAlloc			= -999999}
-	if('setAcceleratedNetworking'	-in $boundParameterNames) { $script:countAcceleratedNetworking	= -999999}
+	if ('setDiskSku'				-in $boundParameterNames) { $script:countDiskSku				= -999999}
+	if ('setVmZone'					-in $boundParameterNames) { $script:countVmZone					= -999999}
+	if ('setLoadBalancerSku'		-in $boundParameterNames) { $script:countLoadBalancerSku		= -999999}
+	if ('setPrivateIpAlloc'			-in $boundParameterNames) { $script:countPrivateIpAlloc			= -999999}
+	if ('setAcceleratedNetworking'	-in $boundParameterNames) { $script:countAcceleratedNetworking	= -999999}
 
 	# filter greenlist
 	compare-greenlist
@@ -7934,6 +8552,8 @@ function new-templateTarget {
 	update-paramSetVmZone
 	update-paramSetDiskSku
 	update-paramSetDiskSize
+	update-paramSetDiskBursting
+	update-paramSetDiskMaxShares
 	update-paramSetDiskCaching
 	update-paramSetAcceleratedNetworking
 
@@ -8075,7 +8695,7 @@ function new-templateTarget {
 	update-bastion
 
 	rename-VMs
-	if ($renameDisks -eq $True) {
+	if ($renameDisks) {
 		rename-disks
 	}
 	# merge VMs AFTER renaming
@@ -8101,14 +8721,12 @@ function new-templateTarget {
 	$script:sourceTemplate.variables  = $script:templateVariables
 
 	# changes caused by default value
-	if ($copyMode -eq $True) {
-		if($script:countDiskSku					-gt 0) { write-changedByDefault "setDiskSku = $setDiskSku" }
-		if($script:countVmZone					-gt 0) { write-changedByDefault "setVmZone = $setVmZone" }
-		if($script:countLoadBalancerSku			-gt 0) { write-changedByDefault "setLoadBalancerSku = $setLoadBalancerSku" }
-		if($script:countPublicIpSku				-gt 0) { write-changedByDefault "setPublicIpSku = $setPublicIpSku" }
-		if($script:countPublicIpAlloc			-gt 0) { write-changedByDefault "setPublicIpAlloc = $setPublicIpAlloc" }
-		if($script:countPrivateIpAlloc			-gt 0) { write-changedByDefault "setPrivateIpAlloc = $setPrivateIpAlloc" }
-		if($script:countAcceleratedNetworking	-gt 0) { write-changedByDefault "setAcceleratedNetworking = $setAcceleratedNetworking" }
+	if ($copyMode) {
+		if ($script:countDiskSku				-gt 0) { write-changedByDefault "setDiskSku = $setDiskSku" }
+		if ($script:countVmZone					-gt 0) { write-changedByDefault "setVmZone = $setVmZone" }
+		if ($script:countLoadBalancerSku		-gt 0) { write-changedByDefault "setLoadBalancerSku = $setLoadBalancerSku" }
+		if ($script:countPrivateIpAlloc			-gt 0) { write-changedByDefault "setPrivateIpAlloc = $setPrivateIpAlloc" }
+		if ($script:countAcceleratedNetworking	-gt 0) { write-changedByDefault "setAcceleratedNetworking = $setAcceleratedNetworking" }
 		write-logFile
 	}
 
@@ -8146,19 +8764,29 @@ function new-templateTarget {
 
 		$script:copyVMs.Values
 		| Sort-Object VmPriority,Name
-		| Select-Object @{label="Deployment Order"; expression={if($_.VmPriority -ne 2147483647){$_.VmPriority}else{''}}},Name
+		| Select-Object `
+			@{label="Deployment Order"; expression={
+				if ($_.VmPriority -ne 2147483647) {
+					$_.VmPriority
+				}
+				else {
+					''
+				}
+			}}, `
+			Name
 		| Format-Table
-		| Tee-Object -FilePath $logPath -append
-		| Out-Host
+		| write-LogFilePipe
 	}
 }
 
 #--------------------------------------------------------------
 function write-changedByDefault {
 #--------------------------------------------------------------
-	param (	$parameter)
+	param (
+		$parameter
+	)
 
-	if ($script:countHeader -ne $True) {
+	if (!$script:countHeader) {
 		$script:countHeader = $True
 		write-logFileWarning "Resources changed by default value:"
 	}
@@ -8249,7 +8877,9 @@ function update-skipVMs {
 #--------------------------------------------------------------
 function get-amsProviderProperty {
 #--------------------------------------------------------------
-	param (	[string] $string)
+	param (
+		[string] $string
+	)
 
 	$property = @{}
 	if ($string.length -eq 0) {
@@ -8286,7 +8916,9 @@ function get-amsProviderProperty {
 #--------------------------------------------------------------
 function set-amsProviderProperty {
 #--------------------------------------------------------------
-	param (	[hashtable] $hash)
+	param (
+		[hashtable] $hash
+	)
 
 	[string] $string = ''
 	$sep = ''
@@ -8310,8 +8942,10 @@ function set-amsProviderProperty {
 #--------------------------------------------------------------
 function update-vnetLocation {
 #--------------------------------------------------------------
-	param (	$vnet,
-			$location )
+	param (
+		$vnet,
+		$location
+	)
 
 	$subnetIDs = @()
 	$nsgNames = @()
@@ -8369,7 +9003,7 @@ function update-vnetLocation {
 #--------------------------------------------------------------
 function new-templateTargetAms {
 #--------------------------------------------------------------
-	if ($createArmTemplateAms -ne $True) {
+	if (!$createArmTemplateAms) {
 		$script:resourcesAMS = @()
 		return
 	}
@@ -8404,7 +9038,7 @@ function new-templateTargetAms {
 			$_.properties.logAnalyticsWorkspaceArmId = $wsId
 		}
 		# create new WS in Managed Resource Group
-		elseif ($amsWsKeep -ne $True) {
+		elseif (!$amsWsKeep) {
 			$_.properties.logAnalyticsWorkspaceArmId = $Null
 		}
 		# keep existing WS
@@ -8416,7 +9050,7 @@ function new-templateTargetAms {
 		}
 
 		# https://docs.microsoft.com/en-us/azure/virtual-machines/workloads/sap/azure-monitor-overview
-		if ($amsShareAnalytics -eq $True) {
+		if ($amsShareAnalytics) {
 			$_.properties.enableCustomerAnalytics = $True
 			write-logFileWarning 'Sharing AMS Customer Analytics Data with Microsoft'
 		}
@@ -8452,7 +9086,7 @@ function new-templateTargetAms {
 	}
 
 	# Module installed?
-	if ($amsUsePowerShell -eq $True) {
+	if ($amsUsePowerShell) {
 		$azHoaVersion = (Get-InstalledModule Az.HanaOnAzure -MinimumVersion 0.3 -ErrorAction 'SilentlyContinue')
 		if ($azHoaVersion.count -eq 0) {
 			write-logFileError 'Minimum required version of module Az.HanaOnAzure is 0.3' `
@@ -8488,7 +9122,7 @@ function new-templateTargetAms {
 	| Where-Object {$_.properties.type -in ('SapHana','MsSqlServer')}
 	| ForEach-Object  {
 
-		if ($amsUsePowerShell -eq $True) {
+		if ($amsUsePowerShell) {
 			$dbPass = ''
 		}
 		elseif ($dbPassword.Length -eq 0) {
@@ -8698,8 +9332,10 @@ function new-amsInstance {
 #--------------------------------------------------------------
 function get-NewName {
 #--------------------------------------------------------------
-	param (	$name,
-			$maxLength)
+	param (
+		$name,
+		$maxLength
+	)
 
 	# just add "2" if length is sufficient
 	if ($name.length -lt $maxLength) {
@@ -8723,7 +9359,9 @@ function get-NewName {
 #--------------------------------------------------------------
 function remove-amsInstance {
 #--------------------------------------------------------------
-	param (	$resourceGroup)
+	param (
+		$resourceGroup
+	)
 
 	$ams = Get-AzSapMonitor -ErrorAction 'SilentlyContinue'
 	test-azResult 'Get-AzSapMonitor'  "Could not get AMS instances"
@@ -8750,12 +9388,14 @@ function remove-amsInstance {
 #--------------------------------------------------------------
 function set-deploymentParameter {
 #--------------------------------------------------------------
-	param (	$paramName,
-			$paramValue,
-			$group,
-			$check )
+	param (
+		$paramName,
+		$paramValue,
+		$group,
+		$check
+	)
 
-	if (($check) -and ($paramName -notin $script:availableParameters)) {
+	if ($check -and ($paramName -notin $script:availableParameters)) {
 		# ARM template was not created by RGCOPY
 		if ($paramName -eq 'storageAccountName') {
 			write-logFileError 	"Invalid ARM template: '$pathArmTemplate'" `
@@ -8781,7 +9421,9 @@ function set-deploymentParameter {
 #--------------------------------------------------------------
 function get-deployParameters {
 #--------------------------------------------------------------
-	param (	$check)
+	param (
+		$check
+	)
 
 	$script:deployParameters = @{}
 
@@ -8789,7 +9431,7 @@ function get-deployParameters {
 	set-deploymentParameter 'storageAccountName' $targetSA 0 $check
 
 	# set template parameter for TiP
-	if ($script:tipEnabled -eq $True) {
+	if ($script:tipEnabled) {
 		# process setGroupTipSession
 		set-parameter 'setGroupTipSession' $setGroupTipSession
 		get-ParameterRule
@@ -8823,8 +9465,10 @@ function get-deployParameters {
 #--------------------------------------------------------------
 function deploy-templateTarget {
 #--------------------------------------------------------------
-	param (	$DeploymentPath,
-			$DeploymentName)
+	param (
+		$DeploymentPath,
+		$DeploymentName
+	)
 
 	write-actionStart "Deploy ARM template $DeploymentPath"
 
@@ -8846,14 +9490,13 @@ function deploy-templateTarget {
 	$script:templateVariables = $armTemplate.variables
 
 	# get ARM deployment parameters
-	get-deployParameters $True
+	get-deployParameters -check $True
 	$parameter.TemplateParameterObject = $script:deployParameters
 	write-logFileHashTable $parameter
 
 	# deploy
 	New-AzResourceGroupDeployment @parameter
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFile $myDeploymentError -ForegroundColor 'yellow'
 		write-logFileError "Deployment '$DeploymentName' failed" `
@@ -8866,8 +9509,10 @@ function deploy-templateTarget {
 #--------------------------------------------------------------
 function deploy-templateTargetAms {
 #--------------------------------------------------------------
-	param (	$DeploymentPath,
-			$DeploymentName)
+	param (
+		$DeploymentPath,
+		$DeploymentName
+	)
 
 	# deploy using ARM template
 	write-logFile "Deploying ARM template '$DeploymentPath'..."
@@ -8887,8 +9532,7 @@ function deploy-templateTargetAms {
 
 	# deploy
 	New-AzResourceGroupDeployment @parameter
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		$NewName = get-NewName $amsInstanceName 30
 		write-logFile $myDeploymentError -ForegroundColor 'Yellow'
@@ -8900,8 +9544,7 @@ function deploy-templateTargetAms {
 		$parameter.TemplateParameterObject 	=  @{ amsInstanceName = $NewName }
 		$parameter.name 					= "$DeploymentName`2"
 		New-AzResourceGroupDeployment @parameter
-		| Tee-Object -FilePath $logPath -append
-		| Out-Host
+		| write-LogFilePipe
 		if (!$?) {
 			write-logFile $myDeploymentError -ForegroundColor 'yellow'
 			write-logFileError "AMS deployment '$DeploymentName' failed" `
@@ -8941,8 +9584,7 @@ function deploy-sapMonitor {
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	$installExtensionsSapMonitor
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileWarning "Deployment of VMAEME for SAP failed"
 	}
@@ -8953,7 +9595,9 @@ function deploy-sapMonitor {
 #--------------------------------------------------------------
 function stop-VMs {
 #--------------------------------------------------------------
-	param (	$resourceGroup)
+	param (
+		$resourceGroup
+	)
 
 	write-actionStart "Stop running VMs in Resource Group $resourceGroup" $maxDOP
 	$VMs = Get-AzVM `
@@ -8978,8 +9622,10 @@ function stop-VMs {
 #--------------------------------------------------------------
 function stop-VMsParallel {
 #--------------------------------------------------------------
-	param (	$resourceGroup,
-			$VMs)
+	param (
+		$resourceGroup,
+		$VMs
+	)
 
 	# using parameters for parallel execution
 	$scriptParameter =  "`$resourceGroup = '$resourceGroup';"
@@ -9003,8 +9649,7 @@ function stop-VMsParallel {
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	$VMs
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileError "Could not stop VMs in resource group $resourceGroup" `
 							"Stop-AzVM failed"
@@ -9014,8 +9659,10 @@ function stop-VMsParallel {
 #--------------------------------------------------------------
 function start-VMsParallel {
 #--------------------------------------------------------------
-	param (	$resourceGroup,
-			$VMs)
+	param (
+		$resourceGroup,
+		$VMs
+	)
 
 	# using parameters for parallel execution
 	$scriptParameter =  "`$resourceGroup = '$resourceGroup';"
@@ -9040,8 +9687,7 @@ function start-VMsParallel {
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	$VMs
 	| ForEach-Object @param
-	| Tee-Object -FilePath $logPath -append
-	| Out-Host
+	| write-LogFilePipe
 	if (!$?) {
 		write-logFileError "Could not start VMs in resource group $resourceGroup" `
 							"Start-AzVM failed"
@@ -9051,7 +9697,9 @@ function start-VMsParallel {
 #--------------------------------------------------------------
 function start-VMs {
 #--------------------------------------------------------------
-	param (	$resourceGroup)
+	param (
+		$resourceGroup
+	)
 
 	write-actionStart "Start COPIED VMs in Resource Group $resourceGroup" $maxDOP
 	$currentVMs = @()
@@ -9090,11 +9738,11 @@ function start-VMs {
 #--------------------------------------------------------------
 function start-sap {
 #--------------------------------------------------------------
-	param (	$resourceGroup)
+	param (
+		$resourceGroup
+	)
 
-	if (($skipStartSAP -eq $True) -or ($script:sapAlreadyStarted -eq $True)) {
-		return $True
-	}
+	if ($skipStartSAP -or $script:sapAlreadyStarted) { return $True }
 
 	if (($scriptVm.length -eq 0) -and ($scriptStartSapPath -notlike '*@*')) {
 		write-logFileWarning "RGCOPY parameter 'scriptVm' not set. SAP not started."
@@ -9114,14 +9762,16 @@ function start-sap {
 #--------------------------------------------------------------
 function get-pathFromTags {
 #--------------------------------------------------------------
-	param (	$vmName,
-			$tagName,
-			$tagValue, 
-			[ref] $refPath,
-			$paramName )
+	param (
+		$vmName,
+		$tagName,
+		$tagValue, 
+		[ref] $refPath,
+		$paramName
+	)
 
 	if ($tagValue.length -ne 0) {
-		if (($refPath.Value.length -eq 0) -and ($ignoreTags -ne $True)) {
+		if (($refPath.Value.length -eq 0) -and !$ignoreTags) {
 			$refPath.Value = $tagValue
 			if ($script:scriptVm.length -eq 0) {
 				$script:scriptVm = $vmName
@@ -9150,22 +9800,15 @@ function get-pathFromTags {
 #--------------------------------------------------------------
 function get-allFromTags {
 #--------------------------------------------------------------
-	param (	[array] $vms,
-			[switch] $hidden )
+	param (
+		[array] $vms,
+		[switch] $hidden
+	)
 
-	if ($script:tagsAlreadyRead -eq $True) { return }
+	if ($script:tagsAlreadyRead) { return }
+
 	$script:tagsAlreadyRead = $True
 	$script:rgcopyTags = @()
-
-	if ($hidden -ne $True) {
-		write-actionStart "Reading RGCOPY tags from VMs"
-		if ($ignoreTags -eq $True) {
-			write-logFileWarning "Tags ignored because parameter 'ignoreTags' was set"
-		}
-		else {
-			write-logFile "Tags can be ignored using RGCOPY parameter switch 'ignoreTags'"
-		}
-	}
 
 	$vmsFromTag = @()
 	foreach ($vm in $vms) {
@@ -9181,7 +9824,7 @@ function get-allFromTags {
 		if ($tags.$azTagSapMonitor.length -ne 0) {
 			if (($tags.$azTagSapMonitor -eq 'true') `
 			-and ($script:installExtensionsSapMonitor.count -eq 0) `
-			-and ($ignoreTags -ne $True)) {
+			-and !$ignoreTags ) {
 				$paramName = 'installExtensionsSapMonitor'
 			}
 			else {
@@ -9201,7 +9844,7 @@ function get-allFromTags {
 		# tag azTagTipGroup
 		$tipGroup = $tags.$azTagTipGroup -as [int]
 		if ($tipGroup -gt 0) {
-			if (($setVmTipGroup.count -eq 0) -and ($ignoreTags -ne $True)) {
+			if (($setVmTipGroup.count -eq 0) -and !$ignoreTags ) {
 				$paramName = 'setVmTipGroup'
 			}
 			else {
@@ -9219,7 +9862,7 @@ function get-allFromTags {
 		# tag azTagDeploymentOrder
 		$priority = $tags.$azTagDeploymentOrder -as [int]
 		if ($priority -gt 0) {
-			if (($setVmDeploymentOrder.count -eq 0) -and ($ignoreTags -ne $True)) {
+			if (($setVmDeploymentOrder.count -eq 0) -and !$ignoreTags ) {
 				$paramName = 'setVmDeploymentOrder'
 			}
 			else {
@@ -9239,13 +9882,24 @@ function get-allFromTags {
 		$script:installExtensionsSapMonitor = $vmsFromTag
 	}
 
-	if ($hidden -ne $True) {
+	if (!$hidden) {
+		write-actionStart "Reading RGCOPY tags from VMs"
+
 		$script:rgcopyTags
 		| Sort-Object vmName, tagName
 		| Select-Object vmName, tagName, paramName, value
 		| Format-Table
-		| Tee-Object -FilePath $logPath -append
-		| Out-Host
+		| write-LogFilePipe
+
+		if ($script:rgcopyTags.count -eq 0) {
+			write-logFile "No RGCOPY tags found"
+		}
+		elseif ($ignoreTags) {
+			write-logFileWarning "Tags ignored because parameter 'ignoreTags' was set"
+		}
+		else {
+			write-logFile "Tags can be ignored using RGCOPY parameter switch 'ignoreTags'"
+		}
 
 		write-actionEnd
 	}
@@ -9254,8 +9908,10 @@ function get-allFromTags {
 #--------------------------------------------------------------
 function remove-storageAccount {
 #--------------------------------------------------------------
-param (	$myRG,
-		$mySA)
+	param (
+		$myRG,
+		$mySA
+	)
 
 	Get-AzStorageAccount `
 		-ResourceGroupName 	$myRG `
@@ -9280,14 +9936,16 @@ param (	$myRG,
 #--------------------------------------------------------------
 function new-storageAccount {
 #--------------------------------------------------------------
-param (	$mySub,
+	param (
+		$mySub,
 		$myRG,
 		$mySA,
-		$myLocation)
+		$myLocation
+	)
 
 	# Backups are stored zone redundant, as cheap as possibe
 	# Cool for backups does not really help: PageBlob must be Hot
-	if ($archiveMode -eq $True) {
+	if ($archiveMode) {
 		$SkuName	= 'Standard_ZRS'
 		$Kind		= 'StorageV2'
 		$accessTier = 'Cool'
@@ -9394,7 +10052,7 @@ param (	$mySub,
 #--------------------------------------------------------------
 function new-resourceGroup {
 #--------------------------------------------------------------
-	if (($skipDeployment -ne $True) -or ($skipBlobs -ne $True)) {
+	if (!$skipDeployment -or !$skipBlobs) {
 
 		$savedSub = $script:currentSub
 		set-context $targetSub # *** CHANGE SUBSCRIPTION **************
@@ -9403,7 +10061,11 @@ function new-resourceGroup {
 			-ErrorAction 'SilentlyContinue' | Out-Null
 		if ($?) {
 			write-logFileTab 'Resource Group' $targetRG 'already exists'
-			if ($skipDiskChecks -ne $True) {
+			if ( !$allowExistingDisks `
+			-and ($setVmMerge.count -eq 0) `
+			-and !$skipDeploymentVMs `
+			-and !$archiveMode `
+			-and !$enableSourceRgMode ) {
 
 				# Get target disks
 				$disksTarget = Get-AzDisk `
@@ -9412,14 +10074,10 @@ function new-resourceGroup {
 				test-azResult 'Get-AzDisk'  "Could not get disks of resource group '$targetRG'" 
 	
 				# check if targetRG already contains disks
-				if ( ($disksTarget.count -ne 0) `
-				-and ($setVmMerge.count -eq 0) `
-				-and ($skipDeploymentVMs -ne $True) `
-				-and ($enableSourceRgMode -ne $True)) {
-					
+				if ($disksTarget.count -ne 0) {
 					write-logFileError "Target resource group '$targetRG' already contains resources (disks)" `
 										"This is only allowed when parameters 'setVmMerge' is used" `
-										"You can skip this check using RGCOPY parameter switch 'skipDiskChecks'"
+										"You can skip this check using RGCOPY parameter switch 'allowExistingDisks'"
 				}
 			}
 		}
@@ -9444,7 +10102,7 @@ function new-resourceGroup {
 		set-context $savedSub # *** CHANGE SUBSCRIPTION **************
 	}
 
-	if ($skipBlobs -ne $True) {
+	if (!$skipBlobs) {
 		new-storageAccount $targetSub $targetRG $targetSA $targetLocation
 	}
 }
@@ -9452,10 +10110,12 @@ function new-resourceGroup {
 #--------------------------------------------------------------
 function invoke-mountPoint {
 #--------------------------------------------------------------
-	param (	$resourceGroup,
-			$scriptVm,
-			$scriptName,
-			$scriptParam)
+	param (
+		$resourceGroup,
+		$scriptVm,
+		$scriptName,
+		$scriptParam
+	)
 
 	Write-Output $scriptName >$tempPathText
 
@@ -9484,7 +10144,7 @@ function invoke-mountPoint {
 	if ($status -eq 1) {
 		write-logFileWarning $result.Value[0].Message
 	}
-	elseif ($verboseLog -eq $True) {
+	elseif ($verboseLog) {
 		write-logFile        $result.Value[0].Message
 	}
 
@@ -9546,12 +10206,13 @@ test () {
 '@ # empty line above needed!
 
 	write-actionStart "CHECK STATUS OF BACKGROUND JOBS (every $waitBlobsTimeSec seconds)"
+	$firstLoop = $True
 	do {
-		if ($secondLoop -eq $True) {
+		if (!$firstLoop) {
 			Write-logFile
 			write-logFile (Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz')
 		}
-		$secondLoop = $True
+		$firstLoop = $False
 		$done = $True
 		foreach ($task in $script:runningTasks) {
 
@@ -9923,8 +10584,12 @@ $script3 = @'
 
 '@ # empty line above needed!
 
-	if ($continueRestore -eq $True)	{ $scriptFunction = $script1 +            $script3 }
-	else							{ $scriptFunction = $script1 + $script2 + $script3 }
+	if ($continueRestore) {
+		$scriptFunction = $script1 +            $script3
+	}
+	else { 
+		$scriptFunction = $script1 + $script2 + $script3
+	}
 
 	write-actionStart 'RESTORE VOLUMES/DISKS from SMB share'
 	$script:runningTasks = @()
@@ -9990,7 +10655,7 @@ function get-subscriptionFeatures {
 	# check TiP parameters
 	if ($subProp -lt 2) {
 		if (($setGroupTipSession.count -ne 0) -or ($setVmTipGroup.count -ne 0)) {
-			write-logFileWarning 'Target Subscription is not TiP enabled'
+			write-logFileWarning 'Target Subscription is not TiP enabled' -stopAtWarning
 		}
 		$script:tipEnabled = $False
 	}
@@ -10002,7 +10667,7 @@ function get-subscriptionFeatures {
 #--------------------------------------------------------------
 function test-justRedeployAms {
 #--------------------------------------------------------------
-	if ($justRedeployAms -ne $True) { return }
+	if (!$justRedeployAms) { return }
 
 	# required steps:
 	$script:skipSnapshots		= $True
@@ -10033,10 +10698,8 @@ function test-justRedeployAms {
 #-------------------------------------------------------------
 function test-archiveMode {
 #-------------------------------------------------------------
-	if ($archiveMode -ne $True) { return }
+	if (!$archiveMode) { return }
 
-	# correct parameters
-	disable-defaultValues
 	if ($skipVMs.count -eq 0) {
 		$script:copyDetachedDisks = $True
 	}
@@ -10072,7 +10735,7 @@ function test-archiveMode {
 	
 	if (('skipBlobs' -in $boundParameterNames) -or ('skipSnapshots' -in $boundParameterNames)) {
 		write-logFileWarning "parameters 'skipBlobs' or 'skipSnapshots' are set" `
-								"the generated BLOBs cannot be used for restoring the source RG"
+								"You might not be able to restore the archived resource group"
 
 	}
 }
@@ -10104,7 +10767,7 @@ function test-justCopyBlobs {
 #--------------------------------------------------------------
 function test-restartBlobs {
 #--------------------------------------------------------------
-	if ($restartBlobs -ne $True) { return }
+	if (!$restartBlobs) { return }
 
 	# required steps:
 	$script:skipArmTemplate		= $True
@@ -10125,7 +10788,7 @@ function test-restartBlobs {
 function test-stopRestore {
 #--------------------------------------------------------------
 	# parameter continueRestore (skip everything until deployment)
-	if ($script:continueRestore -eq $True) {
+	if ($continueRestore) {
 
 		# required steps:
 		$script:skipArmTemplate		= $True
@@ -10142,7 +10805,7 @@ function test-stopRestore {
 			'stopRestore')
 	}
 	# parameter stopRestore (skip everything after deployment)
-	elseif ($stopRestore -eq $True) {
+	elseif ($stopRestore) {
 
 		# required steps:
 		$script:skipRestore			= $True
@@ -10398,8 +11061,6 @@ function step-updateMode {
 		'SetVmDeploymentOrder', 'SetVmTipGroup', 'SetVmName',
 		'skipDisks', 'skipVMs')
 
-	disable-defaultValues
-
 	write-actionStart "Expected changes in resource group '$sourceRG'"
 	# required order:
 	# 1. setVmSize
@@ -10410,6 +11071,8 @@ function step-updateMode {
 
 	# 3. setDiskSize (and setDiskTier)
 	update-paramSetDiskSize
+	update-paramSetDiskBursting
+	update-paramSetDiskMaxShares
 
 	# 4. setDiskCaching
 	update-paramSetDiskCaching
@@ -10425,12 +11088,12 @@ function step-updateMode {
 	write-actionEnd
 
 	# check for running VMs
-	if ($stopVMsSourceRG -ne $True) {
+	if (!$stopVMsSourceRG) {
 		$script:copyVMs.Values
 		| ForEach-Object {
 		
 			if ($_.VmStatus -ne 'VM deallocated') {
-				if ($skipUpdate -eq $True) { 
+				if ($simulate) { 
 					write-logFileWarning "VM '$($_.Name)' is running"
 				}
 				else {
@@ -10442,12 +11105,12 @@ function step-updateMode {
 		}
 	}
 
-	if ($skipUpdate -eq $True) { 
-		write-logFileWarning "Nothing updated because parameter 'skipUpdate' was set"
+	if ($simulate) { 
+		write-logFileWarning "Nothing updated because parameter 'simulate' was set"
 	}
 	else {
 		# stop VMs
-		if ($stopVMsSourceRG -eq $True) {
+		if ($stopVMsSourceRG) {
 			stop-VMs $sourceRG
 		}
 
@@ -10540,8 +11203,11 @@ function update-sourceVMs {
 #-------------------------------------------------------------
 	$updatedAny = $False
 	foreach ($vm in $script:sourceVMs) {
+
 		$vmName = $vm.Name
 		$updated = $False
+		$properties = @()
+
 		if ($script:copyVMs[$vmName].Skip -eq $True) {
 			continue
 		}
@@ -10552,6 +11218,7 @@ function update-sourceVMs {
 		if ($oldSize -ne $newSize) {
 			$vm.HardwareProfile.VmSize = $newSize
 			$updated = $True
+			$properties += 'vmSize'
 		}	
 
 		# process OS disk
@@ -10574,9 +11241,11 @@ function update-sourceVMs {
 			}
 			if ($oldCaching -ne $newCaching) {
 				$param.Caching = $newCaching
+				$properties += 'caching'
 			}
 			if ($oldWa -ne $newWa) {
 				$param.WriteAccelerator = $newWa
+				$properties += 'writeAccelerator'
 			}
 
 			Set-AzVMOsDisk @param | Out-Null
@@ -10605,9 +11274,15 @@ function update-sourceVMs {
 				}
 				if ($oldCaching -ne $newCaching) {
 					$param.Caching = $newCaching
+					if ('caching' -notin $properties) {
+						$properties += 'caching'
+					}
 				}
 				if ($oldWa -ne $newWa) {
 					$param.WriteAccelerator = $newWa
+					if ('writeAccelerator' -notin $properties) {
+						$properties += 'writeAccelerator'
+					}
 				}
 
 				Set-AzVMDataDisk @param | Out-Null
@@ -10618,14 +11293,14 @@ function update-sourceVMs {
 		}
 
 		# perform update
-		if ($updated -eq $True) {
+		if ($updated) {
 			$updatedAny = $True
-			write-logFile "  Updating VM '$vmName'..."
+			write-logFile "  Changing VM '$vmName' properties: $properties..."
 			Update-AzVM -ResourceGroupName $sourceRG -VM $vm -ErrorAction 'SilentlyContinue' | Out-Null
 			test-azResult 'Update-AzVM'  "Colud not update VM '$vmName'"
 		}
 	}
-	if ($updatedAny -eq $False) {
+	if (!$updatedAny) {
 		write-logFile '  No update of any VM needed'
 	}
 }
@@ -10633,37 +11308,44 @@ function update-sourceVMs {
 #-------------------------------------------------------------
 function update-sourceDisks {
 #-------------------------------------------------------------
-	param ( [switch] $beforeVmUpdate)
+	param (
+		[switch] $beforeVmUpdate
+	)
 
 	$updatedAny = $False
 	foreach ($disk in $script:sourceDisks) {
 
 		$diskName = $disk.Name
 		$updated = $False
+		$properties = @()
 
-		if ($script:copyDisks[$diskName].Skip -eq $True) {
+		if (($script:copyDisks[$diskName].Skip -eq $True) `
+		-or ( $beforeVmUpdate -and ($script:copyDisks[$diskName].VmRestrictions -eq $False)) `
+		-or (!$beforeVmUpdate -and ($script:copyDisks[$diskName].VmRestrictions -eq $True ))) {
 			continue
-		}
-
-		if ($beforeVmUpdate) {
-			# Update Disks before VM Update when new VM size does not support PremiumIO
-			if ($script:copyDisks[$diskName].VmRestrictions -eq $False)  {
-				continue
-			}
-		}
-		else {
-			# Update Disks after VM Update when new VM size does support PremiumIO
-			if ($script:copyDisks[$diskName].VmRestrictions -eq $True)  {
-				continue
-			}
 		}
 
 		# set SKU
 		$oldSku = $disk.Sku.Name
 		$newSku = $script:copyDisks[$diskName].SkuName
+		$oldMaxShares = $disk.MaxShares
+		if ($Null -eq $oldMaxShares) {
+			$oldMaxShares = 1
+		}
 		if ($oldSku -ne $newSku) {
+
+			# disable shared disks before converting to Standard_LRS
+			if (($newSku -like 'Standard_?RS') -and ($oldSku -notlike 'Standard_?RS') -and ($oldMaxShares -gt 1)) {
+				$disk.MaxShares = 1
+				$oldMaxShares = 1
+				write-logFile "  Changing disk '$diskName' properties: maxShares..."
+				$disk | Update-AzDisk -ErrorAction 'SilentlyContinue' | Out-Null
+				test-azResult 'Update-AzDisk'  "Colud not update disk '$diskName'"
+			}
+
 			$disk.Sku = [Microsoft.Azure.Management.Compute.Models.DiskSku]::new($newSku)
 			$updated = $True
+			$properties += 'SKU'
 		}
 
 		# set Size
@@ -10672,46 +11354,86 @@ function update-sourceDisks {
 		if ($oldSize -ne $newSize) {
 			$disk.DiskSizeGB = $newSize
 			$updated = $True
+			$properties += 'size'
 		}
 
+		$reducedTier = $False
 		# set Tier
 		$oldTier = $disk.Tier
 		$newTier = $script:copyDisks[$diskName].performanceTierName
-		$reducedTier = $False
 		if ($oldTier -ne $newTier) {
 			$newTierSize = get-diskSize $newTier
 			$oldTierSize = get-diskSize $oldTier
-			# special case: reducing Tier
 			if (($newTier -like 'P*') -and ($oldTier -like 'P*') -and ($newTierSize -lt $oldTierSize)) {
 				$reducedTier = $True
-				# reducing Tier: step 1
-				$disk.Sku = [Microsoft.Azure.Management.Compute.Models.DiskSku]::new('StandardSSD_LRS')
-				$disk.Tier = $Null
-
-				$disk | Update-AzDisk -ErrorAction 'SilentlyContinue' | Out-Null
-				test-azResult 'Update-AzDisk'  "Colud not update disk '$diskName'"
-
-				# reducing Tier: step 2
-				$disk.Sku = [Microsoft.Azure.Management.Compute.Models.DiskSku]::new('Premium_LRS')
 			}
 			$disk.Tier = $newTier
 			$updated = $True
+			$properties += 'performanceTier'
+		}
+
+		# set bursting
+		$oldBursting = $disk.BurstingEnabled
+		if ($null -eq $oldBursting) {
+			$oldBursting = $False
+		}
+		$newBursting = $script:copyDisks[$diskName].BurstingEnabled
+		if ($oldBursting -ne $newBursting) {
+			if (($newTier -like 'P*') -and ($oldTier -like 'P*') -and ($newBursting -eq $False)) {
+				$reducedTier = $True
+			}
+			$disk.BurstingEnabled = $newBursting
+			$updated = $True
+			$properties += 'bursting'
+		}
+
+		# set shared disk
+		#oldMaxShares see above
+		$newMaxShares = $script:copyDisks[$diskName].MaxShares
+		if ($oldMaxShares -ne $newMaxShares) {
+			$disk.MaxShares = $newMaxShares
+			$updated = $True
+			$properties += 'maxShares'
+		}
+
+		# temporarily changing SKU
+		if ($reducedTier) {
+			if ($disk.Sku.Name -eq 'Premium_ZRS') {
+				$tempSKU  = [Microsoft.Azure.Management.Compute.Models.DiskSku]::new('StandardSSD_ZRS')
+				$finalSKU = [Microsoft.Azure.Management.Compute.Models.DiskSku]::new('Premium_ZRS')
+			}
+			else {
+				$tempSKU  = [Microsoft.Azure.Management.Compute.Models.DiskSku]::new('StandardSSD_LRS')
+				$finalSKU = [Microsoft.Azure.Management.Compute.Models.DiskSku]::new('Premium_LRS')
+			}
+			# reducing Tier: step 1
+			$disk.Sku = $tempSKU
+			$disk.Tier = $Null
+			$disk.BurstingEnabled = $False
+
+			$disk | Update-AzDisk -ErrorAction 'SilentlyContinue' | Out-Null
+			test-azResult 'Update-AzDisk'  "Colud not update disk '$diskName'"
+
+			# reducing Tier: step 2
+			$disk.Sku = $finalSKU
+			$disk.Tier = $newTier
+			$disk.BurstingEnabled = $newBursting
 		}
 
 		# perfrom update
 		if ($updated) {
 			$updatedAny = $True
-			write-logFile "  Updating disk '$diskName'..."
+			write-logFile "  Changing disk '$diskName' properties: $properties..."
 			$disk | Update-AzDisk -ErrorAction 'SilentlyContinue' | Out-Null
 			if (!$?) {
 				if ($reducedTier) {
-					write-logFileWarning "Disk '$diskName' has been converted to 'StandardSSD_LRS'"
+					write-logFileWarning "Disk '$diskName' has been converted to 'StandardSSD'"
 				}
 				test-azResult 'Update-AzDisk'  "Colud not update disk '$diskName'"  -always
 			}
 		}
 	}
-	if ($updatedAny -eq $False) {
+	if (!$updatedAny) {
 		write-logFile '  No update of any disk needed'
 	}
 }
@@ -10719,60 +11441,44 @@ function update-sourceDisks {
 #-------------------------------------------------------------
 function update-sourceNICs {
 #-------------------------------------------------------------
-	param (	[switch] $beforeVmUpdate)
+	param (
+		[switch] $beforeVmUpdate
+	)
 
-	# disable Accelerated Networking before updating VM
-	if ($beforeVmUpdate) {
-
-		$newSourceNICS = @()
-
-		$updatedAny = $False
-		foreach ($nic in $script:sourceNICs) {
-			$nicName = $nic.Name
-			$NicRG = $script:copyNics[$nicName].NicRG
-			$inRG = ''
-			if ($NicRG -ne $sourceRG) { $inRG = "in resource group '$NicRG'" }
-
-			$vmRestrictions = $script:copyNics[$nicName].VmRestrictions
-			if (($vmRestrictions) -and ($nic.EnableAcceleratedNetworking -eq $True)) {
-				$nic.EnableAcceleratedNetworking = $False
-				$updatedAny = $True
-				write-logFile "  Disabling Accelerated Networking of NIC '$nicName' $inRG..."
-				$nic = Set-AzNetworkInterface -NetworkInterface $nic -ErrorAction 'SilentlyContinue'
-				test-azResult 'Set-AzNetworkInterface'  "Colud not update network interface '$nicName'" 
-			}
-
-			$newSourceNICS += $nic
+	$updatedAny = $False
+	foreach ($nic in $script:sourceNICs) {
+		$nicName = $nic.Name
+		$NicRG = $nic.ResourceGroupName
+		$inRG = ''
+		if ($NicRG -ne $sourceRG) {
+			$inRG = "in resource group '$NicRG'"
 		}
-		$script:sourceNICs = $newSourceNICS
-		if ($updatedAny -eq $False) {
-			write-logFile '  No update of any NIC needed'
-		}
-	}
 
-	# set Accelerated Networking after updating VM
-	else {
+		$resKey = "networkInterfaces/$NicRG/$nicName"
+		$nicNameNew = $script:remoteNames[$resKey].newName
+		$newAcc = $script:copyNics[$nicNameNew].EnableAcceleratedNetworking
+		$oldAcc = $nic.EnableAcceleratedNetworking
 
-		$updatedAny = $False
-		foreach ($nic in $script:sourceNICs) {
-			$nicName = $nic.Name
-			$NicRG = $script:copyNics[$nicName].NicRG
-			$inRG = ''
-			if ($NicRG -ne $sourceRG) { $inRG = "in resource group '$NicRG'" }
-	
-			$oldAcc = $nic.EnableAcceleratedNetworking
-			$newAcc = $script:copyNics[$nicName].EnableAcceleratedNetworking
-			if ($oldAcc -ne $newAcc) {
+		if ($oldAcc -ne $newAcc) {
+
+			if (($newAcc -eq $False) -and $beforeVmUpdate) {
 				$nic.EnableAcceleratedNetworking = $newAcc
 				$updatedAny = $True
-				write-logFile "  Changing Accelerated Networking of NIC '$nicName' $inRG..."
+				write-logFile "  Changing NIC '$nicName' $inRG property: Turning off Accelerated Networking"
+				Set-AzNetworkInterface -NetworkInterface $nic -ErrorAction 'SilentlyContinue' | Out-Null
+				test-azResult 'Set-AzNetworkInterface'  "Colud not update network interface '$nicName'" 
+			}
+			if (($newAcc -eq $True) -and !$beforeVmUpdate) {
+				$nic.EnableAcceleratedNetworking = $newAcc
+				$updatedAny = $True
+				write-logFile "  Changing NIC '$nicName' $inRG property: Turning on Accelerated Networking"
 				Set-AzNetworkInterface -NetworkInterface $nic -ErrorAction 'SilentlyContinue' | Out-Null
 				test-azResult 'Set-AzNetworkInterface'  "Colud not update network interface '$nicName'" 
 			}
 		}
-		if ($updatedAny -eq $False) {
-			write-logFile '  No update of any NIC needed'
-		}
+	}
+	if (!$updatedAny) {
+		write-logFile '  No update of any NIC needed'
 	}
 }
 
@@ -10914,20 +11620,20 @@ function update-sourceBastion {
 #-------------------------------------------------------------
 function step-prepare {
 #--------------------------------------------------------------
-	if ($justCreateSnapshots -ne $True) {
+	if (!$justCreateSnapshots -and !$simulate) {
 		new-resourceGroup
 		write-logFile
 	}
 
-	if ($allowRunningVMs -eq $True) {
+	if ($allowRunningVMs) {
 		write-logFileWarning 'Parameter allowRunningVMs is set. This could result in inconsistent disk copies.'
 		write-logFile
 	}
 
 	# get source VMs/Disks
-	if (($skipArmTemplate -eq $False) `
-	-or ($skipSnapshots -eq $False) `
-	-or (($useBlobs -eq $True) -and ($skipBlobs -eq $False)) ) {
+	if (!$skipArmTemplate `
+	-or !$skipSnapshots `
+	-or ($useBlobs -and !$skipBlobs) ) {
 
 		get-sourceVMs
 		assert-vmsStopped
@@ -10939,7 +11645,7 @@ function step-prepare {
 #--------------------------------------------------------------
 function step-armTemplate {
 #--------------------------------------------------------------
-	if ($skipArmTemplate -eq $True) { return }
+	if ($skipArmTemplate) { return }
 
 	#--------------------------------------------------------------
 	write-actionStart "Create ARM templates"
@@ -10959,11 +11665,11 @@ function step-armTemplate {
 	$script:armTemplateFilePaths += $exportPath
 
 	# special case: Redeployment of AMS with existing AMS template ($exportPathAms = $pathArmTemplateAms)
-	if (($justRedeployAms -eq $True) -and ($pathArmTemplateAms.length -ne 0)) {
+	if ($justRedeployAms -and ($pathArmTemplateAms.length -ne 0)) {
 		write-logFile -ForegroundColor 'yellow' "Using given Azure Monitoring for SAP template: $exportPathAms"
 	}
 	# special case: Redeployment of AMS
-	elseif (($justRedeployAms -eq $True) -and ($script:resourcesAMS.count -eq 0)) {
+	elseif ($justRedeployAms -and ($script:resourcesAMS.count -eq 0)) {
 		write-logFileError "Invalid parameter 'justRedeployAms'" `
 							"Resource group '$sourceRG' does not contain an AMS instance" `
 							"You might use parameter 'pathArmTemplateAms' for supplying a given AMS template"
@@ -10983,7 +11689,7 @@ function step-armTemplate {
 	write-actionEnd
 
 	#--------------------------------------------------------------
-	if ($justRedeployAms -ne $True) {
+	if (!$justRedeployAms) {
 		write-actionStart "Configured VMs/disks for Target Resource Group $targetRG"
 		show-targetVMs
 		compare-quota
@@ -10994,40 +11700,49 @@ function step-armTemplate {
 #--------------------------------------------------------------
 function step-snapshots {
 #--------------------------------------------------------------
-	if ($skipSnapshots -eq $True) { return }
+	if (!$skipSnapshots) {
+		# run PreSnapshotScript
+		if ($pathPreSnapshotScript.length -ne 0) {
+			if ($useBlobsFromDisk) {
+				write-logFileError "Invalid parameter 'pathPreSnapshotScript'" `
+									"Parameter not allowed when parameter 'useBlobsFromDisk' is set"
+			}
 
-	# run PreSnapshotScript
-	if ($pathPreSnapshotScript.length -ne 0) {
-		if ($useBlobsFromDisk -eq $True) {
-			write-logFileError "Invalid parameter 'pathPreSnapshotScript'" `
-								"Parameter not allowed when parameter 'useBlobsFromDisk' is set"
+			start-VMs $sourceRG
+			start-sap $sourceRG | Out-Null
+			# Last command resulted in $script:vmStartWaitDone = $True
+			# The next script will be executed on the target RG. Therefore, we have to wait again.
+			$script:vmStartWaitDone = $False
+
+			invoke-localScript $pathPreSnapshotScript 'pathPreSnapshotScript'
+
+			write-logFile "Waiting $vmStartWaitSec seconds after running PreSnapshotScript ..."
+			write-logFile "(delay can be configured using RGCOPY parameter 'vmStartWaitSec')"
+			write-logFile
+			Start-Sleep -seconds $vmStartWaitSec
+
+			stop-VMs $sourceRG
+		}
+		# stop VMs
+		elseif ($stopVMsSourceRG) {
+			stop-VMs $sourceRG
 		}
 
-		start-VMs $sourceRG
-		start-sap $sourceRG | Out-Null
-		# Last command resulted in $script:vmStartWaitDone = $True
-		# The next script will be executed on the target RG. Therefore, we have to wait again.
-		$script:vmStartWaitDone = $False
+		# create snapshots
+		new-snapshots
+		if (!$justCreateSnapshots) {
+			new-SnapshotsVolumes
+		}
 
-		invoke-localScript $pathPreSnapshotScript 'pathPreSnapshotScript'
-		stop-VMs $sourceRG
-	}
-	# stop VMs
-	elseif ($stopVMsSourceRG -eq $True) {
-		stop-VMs $sourceRG
 	}
 
-	# create snapshots
-	new-snapshots
-	if ($justCreateSnapshots -ne $True) {
-		new-SnapshotsVolumes
-	}
+	show-snapshots
 }
 
 #--------------------------------------------------------------
 function step-backups {
 #--------------------------------------------------------------
-	if (($script:mountPointsCount -eq 0) -or ($skipBackups -eq $True)) { return }
+	if ($skipBackups -or ($script:mountPointsCount -eq 0)) { return }
 
 	# simulate running Tasks for restartBlobs
 	$script:runningTasks = @()
@@ -11050,7 +11765,7 @@ function step-backups {
 		}
 	}
 	# simulate running Tasks for restartBlobs
-	if ($restartBlobs -eq $True) { return }
+	if ($restartBlobs) { return }
 	$script:runningTasks = @()
 	
 	# start needed VMs (HANA and SAP must NOT auto-start)
@@ -11064,7 +11779,7 @@ function step-backups {
 	backup-mountPoint
 
 	# wait for backup finished (if this is not done in step-blobs)
-	if (($useBlobs -eq $False) -or ($skipBlobs -eq $True)) {
+	if (!$useBlobs -or $skipBlobs) {
 		wait-mountPoint
 		# stop those VMs that have been started before
 		if ($script:toBeStartedVMs.count -ne 0) {
@@ -11081,10 +11796,10 @@ function step-backups {
 #--------------------------------------------------------------
 function step-blobs {
 #--------------------------------------------------------------
-	if (($useBlobs -eq $False) -or ($skipBlobs -eq $True)) { return }
+	if (!$useBlobs -or $skipBlobs) { return }
 
-	if ($restartBlobs -ne $True) {
-		if ($archiveMode -eq $True) { 
+	if (!$restartBlobs) {
+		if ($archiveMode) { 
 			# save RGCOPY PowerShell template
 			$text = "# generated script by RGCOPY for restoring
 `$param = @{
@@ -11110,7 +11825,7 @@ $PSCommandPath @param
 			}
 			$script:armTemplateFilePaths += $restorePath
 			write-zipFile
-			if ($script:errorOccured -eq $True) {
+			if ($script:errorOccured) {
 				write-logFileError "Could not save file to storage account BLOB" `
 									"File name: '$zipPath2'" `
 									"Storage account container: '$targetSaContainer'"
@@ -11141,11 +11856,11 @@ $PSCommandPath @param
 #--------------------------------------------------------------
 function step-deployment {
 #--------------------------------------------------------------
-	if ($skipDeployment -eq $True) { return }
+	if ($skipDeployment) { return }
 
 	#--------------------------------------------------------------
 	# Deploy Virtual Machines
-	if ($skipDeploymentVMs -ne $True) {
+	if (!$skipDeploymentVMs) {
 		deploy-templateTarget $exportPath "$sourceRG.$timestampSuffix"
 	}
 
@@ -11161,11 +11876,11 @@ function step-deployment {
 
 	#--------------------------------------------------------------
 	# Restore files
-	if ($skipRestore -ne $True) { 
+	if (!$skipRestore) { 
 		restore-mountPoint
 		# this sets $skipRestore = $True if there is nothing to restore
 	}
-	if ($skipRestore -ne $True) {
+	if (!$skipRestore) {
 		wait-mountPoint
 	}
 
@@ -11175,15 +11890,15 @@ function step-deployment {
 
 		#--------------------------------------------------------------
 		# just re-deploy AMS (in source RG)
-		if ($justRedeployAms -eq $True) {
+		if ($justRedeployAms) {
 
 			# start VMs in the source RG
-			if ($skipStartSAP -ne $True) {
+			if (!$skipStartSAP) {
 				start-VMs $sourceRG
 			}
 			# start SAP in the source RG
 			$done = start-sap $sourceRG
-			if ($done -eq $False) {
+			if (!$done) {
 				write-logFileError "Azure Monitor for SAP (AMS) could not be re-deployed because SAP is not running"
 			}
 
@@ -11205,7 +11920,7 @@ function step-deployment {
 			# VMs already started in the target RG
 			# start SAP in the target RG
 			$done = start-sap $targetRG
-			if ($done -eq $False) {
+			if (!$done) {
 				write-logFileError "Azure Monitor for SAP (AMS) could not be deployed because SAP is not running"
 			}
 			write-actionStart "Deploy AMS instance"
@@ -11213,7 +11928,7 @@ function step-deployment {
 
 		#--------------------------------------------------------------
 		# deploy using ARM template
-		if ($amsUsePowerShell -ne $True) {
+		if (!$amsUsePowerShell) {
 			deploy-templateTargetAms $exportPathAms "$sourceRG`-AMS.$timestampSuffix"
 		}
 		# deploy using cmdlets
@@ -11229,7 +11944,7 @@ function step-deployment {
 			new-amsProviders
 		}
 		# finish AMS deployment
-		if ($justRedeployAms -eq $True) {
+		if ($justRedeployAms) {
 			write-logFileWarning "All VMs in source resource group '$sourceRG' are still running"
 		}
 		write-actionEnd
@@ -11237,7 +11952,7 @@ function step-deployment {
 
 	#--------------------------------------------------------------
 	# Deploy Extensions
-	if ($skipExtensions -ne $True) {
+	if (!$skipExtensions) {
 		deploy-sapMonitor
 	}
 
@@ -11252,7 +11967,7 @@ function step-deployment {
 #--------------------------------------------------------------
 function step-workload {
 #--------------------------------------------------------------
-	if ($startWorkload -ne $True) { return }
+	if (!$startWorkload) { return }
 
 	# get VMs and tags of targetRG
 	if ($script:targetVMs.count -eq 0) {
@@ -11268,7 +11983,7 @@ function step-workload {
 
 	# start workload
 	$done = start-sap $targetRG
-	if ($done -eq $False) {
+	if (!$done) {
 		write-logFileError "Workload could not be started because SAP is not running"
 	}
 	else {
@@ -11292,17 +12007,24 @@ function step-workload {
 #--------------------------------------------------------------
 function step-cleanup {
 #--------------------------------------------------------------
-	if ($skipCleanup -eq $True) { return }
+	if ($skipCleanup) { return }
 
 	# stop VMs
-	if (($stopVMsTargetRG -eq $True) -and ($skipDeployment -ne $True) -and ($skipDeploymentVMs -ne $True)) {
-		set-context $targetSub # *** CHANGE SUBSCRIPTION **************
-		stop-VMs $targetRG
+	if ($stopVMsTargetRG) {
+		if ($skipDeployment -or $skipDeploymentVMs) {
+			write-logFileWarning "parameter 'stopVMsTargetRG' ignored" `
+								"The VMs have not been created during the current run of RGCOPY" `
+								"Stop the VMs manually"
+		}
+		else {
+			set-context $targetSub # *** CHANGE SUBSCRIPTION **************
+			stop-VMs $targetRG
+		}
 	}
 
 	# delete snapshots in source RG
-	if ($deleteSnapshots -eq $True) {
-		if ($skipSnapshots -eq $True) {
+	if ($deleteSnapshots) {
+		if ($skipSnapshots) {
 			write-logFileWarning "parameter 'deleteSnapshots' ignored" `
 								"The snapshots have not been created during the current run of RGCOPY" `
 								"Re-run RGCOPY with parameter 'justDeleteSnapshots'"
@@ -11314,8 +12036,8 @@ function step-cleanup {
 	}
 
 	# delete storage account in source RG
-	if ($deleteSourceSA -eq $True) {
-		if ($skipRestore -eq $True) {
+	if ($deleteSourceSA) {
+		if ($skipRestore) {
 			write-logFileWarning "parameter 'deleteSourceSA' ignored" `
 								"Storage account '$sourceSA' has not been used during the current run of RGCOPY" `
 								"Delete the storage account manually'"
@@ -11327,8 +12049,8 @@ function step-cleanup {
 	}
 
 	# delete storage account in target RG
-	if ($deleteTargetSA -eq $True) {
-		if (($skipBlobs -eq $True) -or ($skipDeployment -eq $True) -or ($skipDeploymentVMs -eq $True)) {
+	if ($deleteTargetSA) {
+		if ($skipBlobs -or $skipDeployment -or $skipDeploymentVMs) {
 			write-logFileWarning "parameter 'deleteTargetSA' ignored" `
 								"Storage account '$targetSA' has not been used during the current run of RGCOPY" `
 								"Delete the storage account manually'"
@@ -11378,7 +12100,7 @@ try {
 	write-logFile ('*' * $starCount) -ForegroundColor DarkGray
 	write-logFile 'https://github.com/Azure/RGCOPY' -ForegroundColor DarkGray
 	$script:rgcopyParamOrig = $PSBoundParameters
-	write-logFileHashTable $PSBoundParameters
+	write-logFileHashTable $PSBoundParameters -rgcopyParam
 	
 	write-logFile -ForegroundColor 'Cyan' "Log file saved: $logPath"
 	if ($pathExportFolderNotFound.length -ne 0) {
@@ -11403,7 +12125,7 @@ try {
 	if ($blobsSA.Length -eq 0)			{ $blobsSA = $targetSA }
 	if ($blobsSaContainer.Length -eq 0)	{ $blobsSaContainer = $targetSaContainer }
 	
-	if ($skipBlobs -ne $True) {
+	if (!$skipBlobs) {
 		$blobsRG = $targetRG
 		$blobsSA = $targetSA
 		$blobsSaContainer = $targetSaContainer
@@ -11415,7 +12137,7 @@ try {
 	# given ARM template
 	if ($pathArmTemplate.length -ne 0) {
 	
-		if ($(Test-Path -Path $pathArmTemplate) -eq $False) {
+		if ($(Test-Path -Path $pathArmTemplate) -ne $True) {
 			write-logFileError "Invalid parameter 'pathArmTemplate'" `
 								"File not found: '$pathArmTemplate'"
 		}
@@ -11426,7 +12148,7 @@ try {
 	# given AMS ARM tempalte
 	if ($pathArmTemplateAms.length -ne 0) {
 	
-		if ($(Test-Path -Path $pathArmTemplateAms) -eq $False) {
+		if ($(Test-Path -Path $pathArmTemplateAms) -ne $True) {
 			write-logFileError "Invalid parameter 'pathArmTemplateAms'" `
 								"File not found: '$pathArmTemplateAms'"
 		}
@@ -11434,9 +12156,7 @@ try {
 		$script:armTemplateFilePaths += $pathArmTemplateAms
 
 		if ( ($pathArmTemplate.length -eq 0) `
-		-and ($skipDeployment -ne $True) `
-		-and ($skipDeploymentVMs -ne $True) `
-		-and ($justRedeployAms -ne $True)) {
+		-and !$skipDeployment -and !$skipDeploymentVMs -and !$justRedeployAms ) {
 			write-logFileError "Invalid parameter 'pathArmTemplateAms'" `
 								"Parameter 'pathArmTemplate' must also be supplied"
 		}
@@ -11452,10 +12172,10 @@ try {
 		write-logFileError 'PowerShell version 7.1.2 or higher required'
 	}
 	
-	# check Az version, at least version 5.5
-	$azVersion = (Get-InstalledModule Az -MinimumVersion 5.5 -ErrorAction 'SilentlyContinue')
+	# check Az version, at least version 6.0
+	$azVersion = (Get-InstalledModule Az -MinimumVersion 6.0 -ErrorAction 'SilentlyContinue')
 	if ($azVersion.count -eq 0) {
-		write-logFileError 'Minimum required version of module Az is 5.5' `
+		write-logFileError 'Minimum required version of module Az is 6.0' `
 							'Run "Install-Module -Name Az -AllowClobber" to install or update'
 	}
 	
@@ -11622,12 +12342,12 @@ try {
 	# Check Source Subscription
 	$sourceSubID = (Get-AzSubscription -SubscriptionName $sourceSub -ErrorAction 'SilentlyContinue').Id
 	if ($Null -eq $sourceSubID) {
-		write-logFileError "Source Subscription '$sourceSub' not found" '' '' $error[0]
+		write-logFileError "Source Subscription '$sourceSub' not found" -lastError
 	}
 	# Check Source Resource Group
 	$sourceLocation = (Get-AzResourceGroup -Name $sourceRG -ErrorAction 'SilentlyContinue').Location
 	if ($Null -eq $sourceLocation) {
-		write-logFileError "Source Resource Group '$sourceRG' not found" '' '' $error[0]
+		write-logFileError "Source Resource Group '$sourceRG' not found" -lastError
 	}
 	write-logFile 'Source:'
 	write-logFileTab 'Subscription'		$sourceSub
@@ -11640,7 +12360,7 @@ try {
 	#--------------------------------------------------------------
 	# target resource group
 	#--------------------------------------------------------------
-	if ($enableSourceRgMode -eq $True) {
+	if ($enableSourceRgMode) {
 		$targetSub			= $sourceSub
 		$targetSubID		= $sourceSubID
 		$targetSubUser		= $sourceSubUser
@@ -11745,24 +12465,46 @@ try {
 		set-context $sourceSub # *** CHANGE SUBSCRIPTION **************
 	}
 	write-logFile
+
+	#--------------------------------------------------------------
+	# disable-defaultValues
+	#--------------------------------------------------------------
+	if (!$copyMode -or $skipDefaultValues) {
+	
+		if ('setDiskSku' -notin $boundParameterNames) {
+			$setDiskSku = @()
+		}
+		if ('setAcceleratedNetworking' -notin $boundParameterNames) {
+			$setAcceleratedNetworking = @()
+		}
+		if ('setVmZone' -notin $boundParameterNames) {
+			$setVmZone = @()
+		}
+		if ('setLoadBalancerSku' -notin $boundParameterNames) {
+			$setLoadBalancerSku = @()
+		}
+		if ('setPrivateIpAlloc' -notin $boundParameterNames) {
+			$setPrivateIpAlloc = @()
+		}
+	}
 	
 	#--------------------------------------------------------------
 	# debug actions
 	#--------------------------------------------------------------
-	if ($justDeleteSnapshots -eq $True) {
+	if ($justDeleteSnapshots) {
 		get-sourceVMs
 		remove-snapshots
 		write-zipFile 0
 	}
-	elseif ($justCreateSnapshots -eq $True) {
-		$skipSnapshots   = $False
-		$allowRunningVMs = $False
+	elseif ($justCreateSnapshots) {
+		write-logFileForbidden 'justCreateSnapshots' @(
+			'skipSnapshots', 'allowRunningVMs')
 		step-prepare
 		step-snapshots
 		write-zipFile 0
 	}
-	elseif ($justStopCopyBlobs -eq $True) {
-		if ($archiveMode -eq $True) {
+	elseif ($justStopCopyBlobs) {
+		if ($archiveMode) {
 			$blobsSaContainer	= $archiveContainer
 			$targetSaContainer	= $archiveContainer
 		}
@@ -11770,7 +12512,7 @@ try {
 		stop-copyBlobs
 		write-zipFile 0
 	}
-	elseif ($updateMode -eq $True) {
+	elseif ($updateMode) {
 		get-sourceVMs
 		step-updateMode
 		write-zipFile 0
@@ -11780,10 +12522,7 @@ try {
 	# get RGCOPY steps
 	#--------------------------------------------------------------
 	# cleanup
-	if (($stopVMsTargetRG -eq $True) `
-	-or ($deleteSnapshots -eq $True) `
-	-or ($deleteSourceSA -eq $True) `
-	-or ($deleteTargetSA -eq $True)) {
+	if ($stopVMsTargetRG -or $deleteSnapshots -or $deleteSourceSA -or $deleteTargetSA) {
 		$skipCleanup = $False
 	}
 	else {
@@ -11791,7 +12530,7 @@ try {
 	}
 
 	# useBlobsFromDisk requires useBlobs
-	if ($useBlobsFromDisk -eq $True) {
+	if ($useBlobsFromDisk) {
 		$useBlobs = $True
 		$skipSnapshots = $True
 	}
@@ -11818,22 +12557,17 @@ try {
 	test-restartBlobs
 	test-stopRestore
 	test-setVmMerge
-	write-logFileForbidden 'pathArmTemplate' @(
-		'createVolumes', 'createDisks')
+	write-logFileForbidden 'pathArmTemplate' @('createVolumes', 'createDisks')
+	write-logFileForbidden 'deleteTargetSA' @('enableBootDiagnostics')
 	
 	# when BLOBs are not needed for ARM template, then we do not need to copy them
-	if ($useBlobs -ne $True) {
+	if (!$useBlobs) {
 		$skipBlobs = $True
 	}
 	
 	# when BLOBs are needed but not copied (because they already exist in target RG), then we do not need snapshots
-	if (($useBlobs -eq $True) -and ($skipBlobs -eq $True)) {
+	if ($useBlobs -and $skipBlobs) {
 		$skipSnapshots = $True
-	}
-
-	# parameter deleteTargetSA
-	if ($deleteTargetSA -eq $True) {
-		$enableBootDiagnostics = $False
 	}
 	
 	# some not needed steps:
@@ -11843,6 +12577,15 @@ try {
 	if (($createVolumes.count -eq 0) -and ($createDisks.count -eq 0)) {
 		$skipBackups = $True
 		$skipRestore = $True
+	}
+
+	if ($simulate) {
+		$skipSnapshots	= $True
+		$skipBackups	= $True
+		$skipBlobs		= $True
+		$skipDeployment	= $True
+		$skipCleanup	= $True
+		$startWorkload	= $False
 	}
 
 	# output of steps
@@ -11859,22 +12602,18 @@ try {
 	if ($deleteTargetSA   ) {$doDeleteTargetSA  = '[X]'} else {$doDeleteTargetSA  = '[ ]'}
 	if ($stopVMsTargetRG  ) {$doStopVMsTargetRG = '[X]'} else {$doStopVMsTargetRG = '[ ]'}
 
-	if (('pathArmTemplateAms' -in $boundParameterNames) -or ($createArmTemplateAms -eq $True)) {
+	if ($justRedeployAms -or $createArmTemplateAms -or ('pathArmTemplateAms' -in $boundParameterNames)) {
 		$doDeploymentAms   = '[X]'
 	}
 	else {
 		$doDeploymentAms   = '[ ]'
 	}
 	
-	if ($skipDeployment -eq $True) {
+	if ($skipDeployment) {
 		$doDeploymentVMs = '[ ]'
 		$doRestore       = '[ ]'
 		$doDeploymentAms = '[ ]'
 		$doExtensions    = '[ ]'
-	}
-
-	if ($justRedeployAms -eq $True) {
-		$doDeploymentAms = '[X]'
 	}
 
 	write-logFile 'Required steps:'

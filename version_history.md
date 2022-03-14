@@ -39,8 +39,22 @@ feature|Adding an explicitly maintained list of VM sizes with specific restricti
 feature|Create NetApp volumes without having a NetApp subnet in the source RG. New parameter `netAppSubnet`
 feature|Renaming of remote NICs and VNETs. Hereby, you can copy a resource group that uses the same name for a local and a remote VNET (often the name of the vnet is simply 'vnet')
 UI|Do not copy AMS by default. New parameter `createArmTemplateAms`.  Remove parameters ~~`skipAms`~~, ~~`skipDeploymentAms`~~<BR>Azure Monitor for SAP (AMS) is currently in public review with version v1. Version v2 will probably be in public review in 2022. RGCOPY only supports version v1. Once version v2 is available, copying AMS using RGCOPY might not work anymore.
+bug fix| Consistency check for values of parameter setVmZone failed if using different zones for different VMs
 
-
+#### RGCOPY 0.9.32 March 2022
+type|change
+:---|:---
+feature| Display snapshot creation time for all RGCOPY-snapshots before deploying VMs
+feature| Add wait time (parameter `vmStartWaitSec`) after Pre Snapshot Script (`pathPreSnapshotScript`)
+feature| Support for disk bursting. New parameter `setDiskBursting`
+feature| Support for zone redundant disks. New SKUs `Premium_ZRS`,`StandardSSD_ZRS`
+feature| Support for shared disks. New parameter `setDiskMaxShares`
+feature| New parameter `forceVmChecks`. Added explanation of parameter `skipVmChecks` to to documentation. Fixed exception that happened in combination with parameter `skipVmChecks`
+bug fix| Fix exceptions when trying to copy an Ultra SSD disk
+UI| New parameter `allowExistingDisks`. Remove parameters ~~`skipDiskChecks`~~ 
+UI| New parameter `skipDefaultValues`. <BR>Remove default values for parameters `setPublicIpSku` and `setPublicIpAlloc`
+UI| increase minimum required Az version from 5.5 to 6.0 (needed for shared disks)
+UI| New parameter `simulate` that works in all RGCOPY modes. Remove parameter ~~`skipUpdate`~~ that did only work in Update Mode
 
 
 
