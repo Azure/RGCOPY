@@ -11,21 +11,14 @@ RGCOPY relies on several PowerShell modules. A malfunction of these modules migh
 
 #### Analyze deployment errors
 
-The most important feature of RGCOPY is deploying an ARM template. This might fail for various reasons that are not under control of RGCOPY. For example, a specific VM size might not be available in the requested region and zone. In case of an error, check the following log files:
+The most important feature of RGCOPY is deploying an ARM template. This might fail for various reasons that are not under control of RGCOPY. In case of an error, check the following log files:
 
 - **RGCOPY log file**<BR>All error messages and the call stack are displayed on the console and are written to the RGCOPY log file.
 - **Activity log**<BR>This is available in Azure Portal for the resource group and for each resource.
 - **Deployments log**<BR>This is available in Azure Portal for the resource group.
 
-#### Analyze custom script errors
 
-RGCOPY allows you running your own scripts inside the VMs. Failures of these scripts are not the responsibility of RGCOPY.
-
-For running these scripts, RGCOPY uses the cmdlet `Invoke-AzVMRunCommand`. This cmdlet is communicating with the Azure Agent that is installed inside the VM. If this does not work reliably then you should **update the Azure Agent** (waagent) to the newest version. Any other software component inside the VM could also cause problems with `Invoke-AzVMRunCommand`. To be on the save side, you should use an OS image from the Azure Marketplace rather than your own custom OS image.
-
-`Invoke-AzVMRunCommand` expects that the script finishes within roughly one hour. If the script takes longer then `Invoke-AzVMRunCommand` (and RGCOPY) terminates with "Long running operation failed". If you want to use longer running scripts then you must write another script that just triggers or schedules your original script. This other script can be started using `Invoke-AzVMRunCommand`.
-
-#### Supported resources
+#### Supported Azure resource types
 
 Azure is permanently releasing new resource types and new features for existing resources. RGCOPY only supports a limited set of resource types. It is simply impossible to support all of them. In particular, RGCOPY does not support *classic* VMs. Some features (e.g. Network Peering) are only supported for very specific boundary conditions. Adding support for further resource types to RGCOPY might or might not happen in the future.
 A new feature of a supported resource might cause issues with RGCOPY in the future. Therefore, you should always use the newest version of RGCOPY.

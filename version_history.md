@@ -18,7 +18,7 @@ etc|New function convertTo-array that ensures data type [array]
 feature|Wait for VM services to be started (parameter `vmStartWaitSec`)
 bug fix|RGCOPY VM tags for remotely running scripts not working<BR>(`rgcopy.ScriptStartSap`, `rgcopy.ScriptStartLoad`, `rgcopy.ScriptStartAnalysis`)
 
-#### RGCOPY 0.9.30 March 2022
+#### RGCOPY 0.9.30 February 2022
 type|change
 :---|:---
 feature|**Update Mode**: New parameters `updateMode`, `skipUpdate`, `deleteSnapshotsAll`, `createBastion`, `deleteBastion`. By default, RGCOPY is running in Copy Mode. Once the Update Mode is enabled, you can use RGCOPY for changing resource properties in the source RG rather than copying a resource group.
@@ -53,9 +53,17 @@ feature| New parameter `forceVmChecks`. Added explanation of parameter `skipVmCh
 bug fix| Fix exceptions when trying to copy an Ultra SSD disk
 UI| New parameter `allowExistingDisks`. Remove parameters ~~`skipDiskChecks`~~ 
 UI| New parameter `skipDefaultValues`. <BR>Remove default values for parameters `setPublicIpSku` and `setPublicIpAlloc`
-UI| increase minimum required Az version from 5.5 to 6.0 (needed for shared disks)
+UI| Increase minimum required Az version from 5.5 to 6.0 (needed for shared disks)
 UI| New parameter `simulate` that works in all RGCOPY modes. Remove parameter ~~`skipUpdate`~~ that did only work in Update Mode
 
-
+#### RGCOPY 0.9.34 April 2022
+type|change
+:---|:---
+feature| Support for VM Scale Sets Flex. New parameters `skipVmssFlex`, `createVmssFlex`, and `setVmFaultDomain`.
+feature| Since RGCOPY 0.9.30 Boot Diagnostics is not enabled by default. Hereby, a separate Storage Account is not needed by default in the target RG. By using Boot Diagnostics with managed storage account, we can now turn on Boot Diagnostics by default again. Therefore, the parameters changed again: New parameter `skipBootDiagnostics`, remove parameter ~~`enableBootDiagnostics`~~.
+UI| Remove ARM template parameter ~~`storageAccountName`~~. It is not needed anymore for Boot Diagnostics.
+feature| Allowing to run VM scripts on more than one VM. New syntax for scriptStartSapPath, scriptStartLoadPath and scriptStartAnalysisPath: `[local:]<path>@<VM>[,...n]`. Removing parameter ~~`scriptVm`~~ since it is not needed anymore. Remove the prefix ~~`command:`~~. Commands containing an @ now work even without the prefix.
+UI|New parameter `preSnapshotWaitSec`
+bug fix|Workaround for sporadic Azure issues when deploying subnets in parallel: create dependency chain in ARM template to prevent parallel deployment. Sporadic deployment error was: `Another operation on this or dependent resource is in progress`
 
 

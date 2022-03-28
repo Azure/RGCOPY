@@ -8,17 +8,28 @@ RGCOPY has been developed for copying an SAP landscape and testing Azure with SA
 
 RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mode. 
 
-In **[Copy Mode](./rgcopy-docu.md#Workflow)**, an ARM template is exported from the source RG, modified and deployed on the target RG. Hereby, you can change several [resource properties](./rgcopy-docu.md#Resource-Configuration-Parameters) in the target RG:
-- VM size, disk SKU, disk performance tier, disk caching, Write Accelerator, Accelerated Networking
-- Adding, removing, and changing [Proximity Placement Groups, Availability Sets, and Availability Zones](./rgcopy-docu.md#Parameters-for-Availability).
-- Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa (on Linux VMs).
-- Converting [Ultra SSD disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) to Premium SSD disks and vice versa (on Linux VMs).
-- [Merging](./rgcopy-docu.md#Merging-and-Cloning-VMs) single VMs into an existing subnet (target RG already exists)
-- [Cloning](./rgcopy-docu.md#Merging-and-Cloning-VMs) a VM inside a resource group (target RG = source RG)
+- In **[Copy Mode](./rgcopy-docu.md#Workflow)**, an ARM template is exported from the source RG, modified and deployed on the target RG. Hereby, you can change several [resource properties](./rgcopy-docu.md#Resource-Configuration-Parameters) in the target RG:
+    - Changing VM size, disk SKU, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking
+    - Adding, removing, and changing [availibility](./rgcopy-docu.md#Parameters-for-Availability) configuration: Proximity Placement Groups, Availability Sets, Availability Zones, and VM Scale Sets
+    - Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa (on Linux VMs)
+    - Converting [Ultra SSD disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) to Premium SSD disks and vice versa (on Linux VMs)
+    - [Merging](./rgcopy-docu.md#Merging-and-Cloning-VMs) single VMs into an existing subnet (target RG already exists)
+    - [Cloning](./rgcopy-docu.md#Merging-and-Cloning-VMs) a VM inside a resource group (target RG = source RG)
 
-In **[Archive Mode](./rgcopy-docu.md#Archive-Mode)**, a backup of all disks to cost-effective BLOB storage is created in an storage account of the target RG. An ARM template that contains the resources of the source RG is also stored in the BLOB storage. In this mode, no other resource is deployed in the target RG.
+- In **[Archive Mode](./rgcopy-docu.md#Archive-Mode)**, a backup of all disks to cost-effective BLOB storage is created in an storage account of the target RG. An ARM template that contains the resources of the source RG is also stored in the BLOB storage. In this mode, no other resource is deployed in the target RG.
 
-In **[Update Mode](./rgcopy-docu.md#Update-Mode)**, you can use RGCOPY for changing resource properties in the source RG rather than copying a resource group. For example, you can convert all disks to SKU Standard_LRS for saving costs of stopped VMs.
+- In **[Update Mode](./rgcopy-docu.md#Update-Mode)**, you can change resource properties in the source RG, for example VM size, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking. For saving costs of unused resource groups, RGCOPY can do the following:
+    - Changing disk SKU to 'Standard_LRS' (or any other SKU except for 'UltraSSD_LRS')
+    - Deletion of an Azure Bastion including subnet and IP Address (or creation of a Bastion)
+    - Deletion of all snapshots in the source RG
+    - Stopping all VMs in the source RG
+    - Changing NetApp service level to 'Standard' (or any other service level)
+
+The online documentation of RGCOPY is available using the following command:
+
+```powershell
+Get-Help .\rgcopy.ps1 -Online
+```
 
 The following example demonstrates the user interface of RGCOPY in **Copy Mode**:
 
