@@ -3027,7 +3027,6 @@ function get-sourceVMs {
 											-status `
 											-ErrorAction 'SilentlyContinue' ) -saveError
 	test-azResult 'Get-AzVM'  "Could not get VMs of resource group $sourceRG"
-	get-allFromTags $script:sourceVMs $sourceRG
 
 	# Get source disks
 	$script:sourceDisks = convertTo-array ( Get-AzDisk `
@@ -3080,6 +3079,7 @@ function get-sourceVMs {
 
 	update-paramSkipDisks
 	show-sourceVMs
+	get-allFromTags $script:sourceVMs $sourceRG
 
 	write-stepEnd
 }
