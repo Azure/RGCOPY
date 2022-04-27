@@ -31,7 +31,7 @@ UI|New section "Reading RGCOPY tags from VMs" to display Azure tags that impact 
 feature|Cost efficiency: New parameters `deleteSnapshots`, `deleteSourceSA`, `deleteTargetSA` for deleting unneeded resources in a cleanup step at the end of an RGCOPY run.
 feature|New parameter `enableBootDiagnostics`, remove parameter ~~`skipBootDiagnostics`~~. Hereby, the storage account that is just used for storing the boot diagnostics is not needed by default.
 feature|Only start *needed* (rather than all) VMs when copying NetApp volumes or Ultra SSD disks. Stop these VMs afterwards (rather than keep them running).
-bug fix|Divide by zero error if a quota for a used VM family does exists but the quota is 0
+bug fix|Divide by zero error if a quota for a used VM family was explicitly set to 0 (rather than deleting the quota)
 feature|Check version of VM Agent and wait until VM Agent is started (new parameter `vmAgentWaitMinutes`). 
 feature|New parameter `stopVMsSourceRG`, `stopVMsTargetRG`. Remove parameters ~~`stopVMs`~~
 feature|**Moving NetApp Volumes** in Update Mode: Hereby, the Service Level of the volumes can be changed. New parameters `netAppAccountName`, `netAppPoolName`, `netAppServiceLevel`, `netAppPoolGB`, `netAppMovePool`, `netAppMoveForce`, `smbTier`. Remove parameters ~~`capacityPoolGB`~~, ~~`smbTierStandard`~~
@@ -60,10 +60,21 @@ UI| New parameter `simulate` that works in all RGCOPY modes. Remove parameter ~~
 type|change
 :---|:---
 feature| Support for VM Scale Sets Flex. New parameters `skipVmssFlex`, `createVmssFlex`, and `setVmFaultDomain`.
-feature| Since RGCOPY 0.9.30 Boot Diagnostics is not enabled by default. Hereby, a separate Storage Account is not needed by default in the target RG. By using Boot Diagnostics with managed storage account, we can now turn on Boot Diagnostics by default again. Therefore, the parameters changed again: New parameter `skipBootDiagnostics`, remove parameter ~~`enableBootDiagnostics`~~.
+feature| Since RGCOPY 0.9.30 Boot Diagnostics is not enabled by default. Hereby, a separate Storage Account is not needed by default in the target RG.<BR>By using the new Azure feature "Boot Diagnostics with managed storage account", we can now turn on Boot Diagnostics by default again. Therefore, the parameters changed again: New parameter `skipBootDiagnostics`, remove parameter ~~`enableBootDiagnostics`~~.
 UI| Remove ARM template parameter ~~`storageAccountName`~~. It is not needed anymore for Boot Diagnostics.
 feature| Allowing to run VM scripts on more than one VM. New syntax for scriptStartSapPath, scriptStartLoadPath and scriptStartAnalysisPath: `[local:]<path>@<VM>[,...n]`. Removing parameter ~~`scriptVm`~~ since it is not needed anymore. Remove the prefix ~~`command:`~~. Commands containing an @ now work even without the prefix.
 UI|New parameter `preSnapshotWaitSec`
 bug fix|Workaround for sporadic Azure issues when deploying subnets in parallel: create dependency chain in ARM template to prevent parallel deployment. Sporadic deployment error was: `Another operation on this or dependent resource is in progress`
 
+#### RGCOPY 0.9.36 Mai 2022
+type|change
+:---|:---
+feature| VNETs and NICs of other resource groups are also copied if they are referenced in the source RG. All other referenced remote resources cause an error in RGCOPY. When setting the new parameter `skipRemoteReferences`, these remote resources (for example a Network Security Group or an Availability Set) are simply ignored.
+bug fix|Snapshot with a name longer than 80 characters caused an error. This has been fixed by truncating the name. Therefore, not *all* RGCOPY snapshots have now the extension `.rgcopy` anymore.
+feature|When using the parameter `simulate`, several errors are just displayed. RGCOPY continues running but does not deploy anything. Hereby, you can see all errors in a single RGCOPY run, for example: skipped VM not found, number of NICs not supported for VM size, quota of VM size in region exceeded.
+bug fix| Exceeded CPU quota not always detected by RGCOPY. Resulting CPU usage of 100.1% (that cannot be deployed) was rounded to 100% (that can be deployed). Everything greater than 100% is now rounded to 101%.
+workflow| Revoking access from snapshots after BLOB copy. This was done in the past only when deleting snapshots (or automatically after 3 days)
+feature| Creating a public IP address when merging a VM that originally had at least one public IP address
+bug fix| Could not explicitly disable Disk Bursting, Write Accelerator, Accelerated Networking. Parameter value was always evaluated to True
+UI|Improved consistency checks for parameters:<BR>- skipVMs, skipDisks, skipSecurityRules, keepTags: checking for (disallowed) data type: array of array of string<BR>- archiveContainer: checking for upper case characters.<BR>- setAcceleratedNetworking: checking that NIC is not connected to NetApp volume
 

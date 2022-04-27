@@ -10,7 +10,7 @@ RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mo
 
 - In **[Copy Mode](./rgcopy-docu.md#Workflow)**, an ARM template is exported from the source RG, modified and deployed on the target RG. Hereby, you can change several [resource properties](./rgcopy-docu.md#Resource-Configuration-Parameters) in the target RG:
     - Changing VM size, disk SKU, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking
-    - Adding, removing, and changing [availibility](./rgcopy-docu.md#Parameters-for-Availability) configuration: Proximity Placement Groups, Availability Sets, Availability Zones, and VM Scale Sets
+    - Adding, removing, and changing [availability](./rgcopy-docu.md#Parameters-for-Availability) configuration: Proximity Placement Groups, Availability Sets, Availability Zones, and VM Scale Sets
     - Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa (on Linux VMs)
     - Converting [Ultra SSD disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) to Premium SSD disks and vice versa (on Linux VMs)
     - [Merging](./rgcopy-docu.md#Merging-and-Cloning-VMs) single VMs into an existing subnet (target RG already exists)
@@ -25,20 +25,23 @@ RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mo
     - Stopping all VMs in the source RG
     - Changing NetApp service level to 'Standard' (or any other service level)
 
-The online documentation of RGCOPY is available using the following command:
+The **[online documentation](./rgcopy-docu.md)** of RGCOPY is available using the following command:
 
 ```powershell
 Get-Help .\rgcopy.ps1 -Online
 ```
 
+An introduction to RGCOPY is available as a **[YouTube video](https://www.youtube.com/watch?v=8pCN10CRXtY)**.
+
+
 The following example demonstrates the user interface of RGCOPY in **Copy Mode**:
 
 ```powershell
 $rgcopyParameter = @{
-    sourceRG        = 'contoso_source_rg'
-    targetRG        = 'contoso_target_rg'
+    sourceRG        = 'sap_vmss_zone'
+    targetRG        = 'sap_vmss_zone_copy'
     targetLocation  = 'eastus'
-    setVmSize       = 'Standard_E32s_v3'
+    setVmSize       = 'Standard_E4ds_v4'
     setDiskSku      = 'Premium_LRS'
 }
 .\rgcopy.ps1 @rgcopyParameter

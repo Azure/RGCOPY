@@ -1,5 +1,5 @@
 # RGCOPY documentation
-**Version: 0.9.34<BR>April 2022**
+**Version: 0.9.36<BR>Mai 2022**
 ***
 
 ### Introduction
@@ -14,7 +14,7 @@ RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mo
 
 - In **[Copy Mode](./rgcopy-docu.md#Workflow)**, an ARM template is exported from the source RG, modified and deployed on the target RG. Hereby, you can change several [resource properties](./rgcopy-docu.md#Resource-Configuration-Parameters) in the target RG:
     - Changing VM size, disk SKU, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking
-    - Adding, removing, and changing [availibility](./rgcopy-docu.md#Parameters-for-Availability) configuration: Proximity Placement Groups, Availability Sets, Availability Zones, and VM Scale Sets
+    - Adding, removing, and changing [availability](./rgcopy-docu.md#Parameters-for-Availability) configuration: Proximity Placement Groups, Availability Sets, Availability Zones, and VM Scale Sets
     - Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa (on Linux VMs)
     - Converting [Ultra SSD disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) to Premium SSD disks and vice versa (on Linux VMs)
     - [Merging](./rgcopy-docu.md#Merging-and-Cloning-VMs) single VMs into an existing subnet (target RG already exists)
@@ -29,20 +29,23 @@ RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mo
     - Stopping all VMs in the source RG
     - Changing NetApp service level to 'Standard' (or any other service level)
 
-The online documentation of RGCOPY is available using the following command:
+This documentation is also available using the following command:
 
 ```powershell
 Get-Help .\rgcopy.ps1 -Online
 ```
 
+An introduction to RGCOPY is available as a **[YouTube video](https://www.youtube.com/watch?v=8pCN10CRXtY)**.
+
+
 The following example demonstrates the user interface of RGCOPY in **Copy Mode**:
 
 ```powershell
 $rgcopyParameter = @{
-    sourceRG        = 'contoso_source_rg'
-    targetRG        = 'contoso_target_rg'
+    sourceRG        = 'sap_vmss_zone'
+    targetRG        = 'sap_vmss_zone_copy'
     targetLocation  = 'eastus'
-    setVmSize       = 'Standard_E32s_v3'
+    setVmSize       = 'Standard_E4ds_v4'
     setDiskSku      = 'Premium_LRS'
 }
 .\rgcopy.ps1 @rgcopyParameter
@@ -258,14 +261,17 @@ Parameter **`removeFQDN`** always has the default value `$True` (even when `skip
 
 ### VM consistency checks
 
-By default, RGCOPY performs several consistency checks. If the VM size does not exist in the target region then RGCOPY terminates with an error before trying to deploy the target RG. Same happens if the maximum number of NICs or disks is exceeded when changing the VM size.
+RGCOPY performs several consistency checks. Some of the found issues are automatically corrected by default. In this case, a warning is written into the RGCOPY log file. You should have a close look at this file to become aware of the (possibly unwanted) mediation of these issues. For example:
 
-When the subscription quota for the VM size and region is not sufficient then RGCOPY gives a warning when just creating an ARM template. If you want to deploy the target RG at the same time then RGCOPY terminates with an error (rather than just giving a warning).
+- Premium SSD disks are  converted to Standard SSD disks if the VM size does not support Premium IO
+- Accelerated Networking and Write Accelerator are disabled if not supported by the VM size
+- Read-write caching is disabled if Write Accelerator is enabled
 
+Some issues cannot be corrected by RGCOPY and result in an error, for example when:
 
-Other problems are automatically fixed by adjusting properties to allowed values according to the VM size and target region. For example, Premium SSD disks are automatically converted to Standard SSD disks if the VM size does not support Premium IO. Accelerated Networking and Write Accelerator are disabled if not supported by the VM size. Read-write caching is disabled if Write Accelerator is enabled...
-
-RGCOPY writes a warning into its log file every time a resource property is automatically adjusted. You should have a close look at the RGCOPY log file to become aware of the (possibly unwanted) mediation of these issues.
+- VM size does not exist in the target region
+- Maximum number of NICs or disks is exceeds when changing the VM size
+- Subscription quota for the VM size and region is not sufficient
 
 You can change the default behavior of RGCOPY consistency checks using the following parameters:
 
@@ -273,13 +279,14 @@ parameter|[DataType]: usage
 :---|:---
 **`forceVmChecks`**| **[switch]**: Do not automatically adjust any resource property<BR>Once this switch is set, RGCOPY terminates if an incompatible resource property is set. RGCOPY does not try solving such issues automatically. For example, it does not automatically convert Premium SSD disks if the VM size does not support Premium IO.
 **`skipVmChecks`**| **[switch]**: Ignore any incompatible resource property<BR>Normally, setting this parameter switch does not make any sense. When allowing incompatible resource properties then the deployment will fail. However, there is one scenario where this parameter is useful: RGCOPY relies on SKU information retrieved by `Get-AzComputeResourceSku`. If this information is wrong for any reason and you are sure that you know it better then you can set this parameter switch.
+**`simulate`**| **[switch]**: Do not stop for (most of the) found consistency errors.<BR>For each found error, RGCOPY writes a warning in red color. This is useful for detecting *all* errors by just running RGCOPY once. However, it is a simulation. You cannot copy a resource group while parameter `simulate` is set.
 
 ### Parameters for skipping resources
 
 parameter|[DataType]: usage
 :---|:---
 **`skipVMs`**|**[array] of VM names**: These VMs and their disks are not copied by RGCOPY.<BR>NICs that are bound only to these VMs and Public IP Addresses are skipped, too. However, NICs that are also bound to Load Balancers are still copied.
-**`skipDisks`**|**[array] of disk names**: These disks are not copied by RGCOPY.<BR>Take care with this parameter. Starting their VMs could fail in the target RG. See section NetApp Volumes for details and solution.
+**`skipDisks`**|**[array] of disk names**: These disks are not copied by RGCOPY.<BR>Take care with this parameter. Starting their VMs could fail in the target RG. See section [NetApp Volumes and Ultra SSD disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks)
 **`skipSecurityRules`**|**[array] of name patterns**: default value: `@('SecurityCenter-JITRule*')`<BR>Skips all security rules that name matches any element of the array.<BR>By default, only Just-in-Time security rules are skipped (This is needed to avoid permanently opend ports in the target RG). All other security rules are copied.
 **`skipAvailabilitySet`**<BR>**`skipProximityPlacementGroup`**|see [Parameters for Availability](./rgcopy-docu.md#Parameters-for-Availability)
 **`skipBastion`**|**[switch]**: do not copy Azure Bastion from source RG
@@ -486,6 +493,7 @@ The following RGCOPY parameters are available:
 
 parameter|usage
 :---|:---
+**`skipDisks`** = <BR>`@('diskName1',  ...)`	|**[array] of disk names**: These disks are not copied by RGCOPY.<BR>Take care with this parameter. Starting their VMs could fail in the target RG. When using this parameter, you must set **`/etc/fstab`** for all disks (not only the skipped disks) as described above.
 **`createVolumes`** = <BR>`@("size@,mp1,mp2,...", ...)`			|Create new NetApp volumes in the target RG<BR>**size**: volume size in GB <BR>**mp**: mount point `/<server>/<path>` (e.g. /dbserver/hana/shared)
 **`createDisks`** = <BR>`@("size@,mp1,mp2,...", ...)`<BR>`@("size/iops/mbps@mp1,mp2,...", ...)`|Create new disks in the target RG<BR>**size**: disk size in GB<BR>**iops**: I/Os per second: only needed and allowed for Ultra SSD disks<BR>**mbps**: megabytes per second: only needed and allowed for Ultra SSD disks<BR>**mp**: mount point `/<server>/<path>` (e.g. /dbserver/hana/shared)
 **`snapshotVolumes`** = <BR>`@("account/pool@vol1,vol2...", ...)`<BR>`@("rg/account/pool@vol1,vol2...", ...)`			|Create NetApp volume snapshots in the source RG<BR>**rg**: resource group name that contains the NetApp account (optional)<BR>**account**: NetApp account name<BR>**pool**: NetApp pool name<BR>**vol**: NetApp volume name<BR>rg is optional. Default value is `sourceRG`
@@ -953,6 +961,7 @@ The following ARM resources are copied from the source RG:
 - Microsoft.Compute/disks
 - Microsoft.Compute/availabilitySets
 - Microsoft.Compute/proximityPlacementGroups
+- Microsoft.Compute/virtualMachineScaleSets
 - Microsoft.Network/virtualNetworks
 - Microsoft.Network/virtualNetworks/subnets
 - Microsoft.Network/networkInterfaces
@@ -1054,9 +1063,9 @@ For starting a workload test you need two things:
 1. A source RG with the workload (VMs containing SAP System and script for starting SAP)
 2. The deployment tool (RGCOPY)
 
-RGCOPY tags are used to decouple these two parts. For example, the path of the SAP start script should not be part of the deployment (RGCOPY parameter `scriptStartSapPath`). It should rather be part of the workload. You can achieve this by setting RGCOPY Azure Tag `rgcopy.ScriptStartSap` on a VM in the source RG.
+RGCOPY tags are used to decouple these two parts. For example, the path of the SAP start script should not be part of the deployment (RGCOPY parameter `scriptStartSapPath`). It should rather be part of the workload. You can achieve this by setting the Azure Tag `rgcopy.ScriptStartSap` on any VM in the source RG. Keep in mind that this is a tag of a VM , not a tag of the resource group.
 
-With RGCOPY Azure TAgs you can impact the RGCOPY behavior. These tags will also be copied to the target RG. The tags are evaluated by RGCOPY as long as parameter switch **`ignoreTags`** is not set:
+With RGCOPY Azure TAgs you can impact the RGCOPY behavior. These tags will also be copied to the VMs in the target RG. The tags are evaluated by RGCOPY as long as parameter switch **`ignoreTags`** is not set:
 
 virtual machine tag|[DataType]: usage
 :---|:---
@@ -1071,7 +1080,7 @@ virtual machine tag|[DataType]: usage
 **`rgcopy.ScriptStartLoad`**  |**[string]**: Sets the parameter `scriptStartLoadPath` to the value of the tag <BR>if the parameter is not already explicitly set (and `ignoreTags` is not set).
 **`rgcopy.ScriptStartAnalysis`**|**[string]**: Sets the parameter `scriptStartAnalysisPath` to the value of the tag <BR>if the parameter is not already explicitly set (and `ignoreTags` is not set).
 
-In addition, RGCOPY writes the following tags:
+In addition, RGCOPY writes the following two tags. These are **tags of the Resource Group** while all other tags above are **tags of the Virtual Machine**
 resource group tag|[DataType]: usage
 :---|:---
 **`Owner`**|**[string]**: Default value is `targetSubUser`.<BR>You can set the tag to any value by using parameter **`setOwner`**.<BR>When setting this parameter it to $Null, no "Owner" tag will be created.
@@ -1185,7 +1194,7 @@ tag-set.ps1 $resourceGroup vm2 'rgcopy.ScriptStartSap=/root/startSAP.sh@vm2'
 
 
 ### Analyzing Failed Deployments
-Azure is validating an ARM template as the first step of an deployment. This validation might fail for various reasons. In this case, you can see the errors **in the output of RGCOPY** (on the host and in the RGCOPY log file). RGCOPY performs several checks (including quota of VM families) before starting the deployment. The screenshot below shows a quota issue that has not been checked in beforehand by RGCOPY yet.
+Azure is validating an ARM template as the first step of an deployment. This validation might fail for various reasons. In this case, you can see the errors **in the output of RGCOPY** (on the host and in the RGCOPY log file). RGCOPY performs several checks (including quota of VM families) before starting the deployment. The screenshot below is from a deployment that explicitly turned off RGCOPY quota checks (using RGCOPY switch `skipVmChecks`)
 
 If the ARM template validation succeeds but errors occur during deployment then you can check details of the deployment errors **in the Azure Portal**.
 
