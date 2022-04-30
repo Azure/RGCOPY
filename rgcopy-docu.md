@@ -35,8 +35,7 @@ This documentation is also available using the following command:
 Get-Help .\rgcopy.ps1 -Online
 ```
 
-An introduction to RGCOPY is available as a **[YouTube video](https://www.youtube.com/watch?v=8pCN10CRXtY)**.
-
+An introduction to RGCOPY is available as a **[YouTube video](https://www.youtube.com/watch?v=8pCN10CRXtY)**. An overview of Update Mode is also on **[YouTube](https://www.youtube.com/watch?v=_iiSeyci7TY)**.
 
 The following example demonstrates the user interface of RGCOPY in **Copy Mode**:
 
