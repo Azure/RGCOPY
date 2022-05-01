@@ -4,7 +4,7 @@ RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies the most importan
 
 RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it [supports](./rgcopy-docu.md#Supported-Azure-Resources) the most important Azure resources needed for SAP, as virtual machines, managed disks and Load Balancers. However, you can use RGCOPY also for other workloads.
 
-> RGCOPY is not an SAP deployment tool. It simply copies Azure resources (VMs, disks, NICs ...). It does not change anything inside the VMs like changing the server name at the OS level or applying SAP license keys.
+>  :memo: **Note:** RGCOPY is not an SAP deployment tool. It simply copies Azure resources (VMs, disks, NICs ...). It does not change anything inside the VMs like changing the server name at the OS level or applying SAP license keys.
 
 RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mode. 
 
@@ -25,15 +25,6 @@ RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mo
     - Stopping all VMs in the source RG
     - Changing NetApp service level to 'Standard' (or any other service level)
 
-The **[online documentation](./rgcopy-docu.md)** of RGCOPY is available using the following command:
-
-```powershell
-Get-Help .\rgcopy.ps1 -Online
-```
-
-An introduction to RGCOPY is available as a **[YouTube video](https://www.youtube.com/watch?v=8pCN10CRXtY)**. An overview of Update Mode is also on **[YouTube](https://www.youtube.com/watch?v=_iiSeyci7TY)**.
-
-
 The following example demonstrates the user interface of RGCOPY in **Copy Mode**:
 
 ```powershell
@@ -48,6 +39,23 @@ $rgcopyParameter = @{
 ```
 
 !["RGCOPY"](/images/RGCOPY.png)
+
+## Documentation
+
+The **[online documentation](./rgcopy-docu.md)** of RGCOPY is available using the following command:
+
+```powershell
+Get-Help .\rgcopy.ps1 -Online
+```
+
+You can watch an introduction to RGCOPY on YouTube (22:35):
+
+[![RGCOPY Update Mode](https://i.ytimg.com/vi/8pCN10CRXtY/hqdefault.jpg?sqp=-oaymwEcCNACELwBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLA_5bSKU4gbs7HkZ_GruZkQISo_2Q)](https://www.youtube.com/watch?v=8pCN10CRXtY)
+
+
+An overview of RGCOPY Update Mode is also available on YouTube (9:27):
+
+[![RGCOPY Update Mode](https://i.ytimg.com/an_webp/_iiSeyci7TY/mqdefault_6s.webp?du=3000&sqp=CJLEuJMG&rs=AOn4CLCvw7ZZk_ZcqU6ySr0By9ZLwtaFNQ)](https://www.youtube.com/watch?v=_iiSeyci7TY)
 
 ## Trademarks
 
