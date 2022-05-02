@@ -50,12 +50,11 @@ Get-Help .\rgcopy.ps1 -Online
 
 You can watch an introduction to RGCOPY on YouTube (22:35):
 
-[![RGCOPY Update Mode](https://i.ytimg.com/vi/8pCN10CRXtY/hqdefault.jpg?sqp=-oaymwEcCNACELwBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLA_5bSKU4gbs7HkZ_GruZkQISo_2Q)](https://www.youtube.com/watch?v=8pCN10CRXtY)
-
+[![RGCOPY Update Mode](https://i.ytimg.com/vi/8pCN10CRXtY/hqdefault.jpg)](https://www.youtube.com/watch?v=8pCN10CRXtY)
 
 An overview of RGCOPY Update Mode is also available on YouTube (9:27):
 
-[![RGCOPY Update Mode](https://i.ytimg.com/an_webp/_iiSeyci7TY/mqdefault_6s.webp?du=3000&sqp=CJLEuJMG&rs=AOn4CLCvw7ZZk_ZcqU6ySr0By9ZLwtaFNQ)](https://www.youtube.com/watch?v=_iiSeyci7TY)
+[![RGCOPY Update Mode](https://i.ytimg.com/vi/_iiSeyci7TY/hqdefault.jpg)](https://www.youtube.com/watch?v=_iiSeyci7TY)
 
 ## Trademarks
 
