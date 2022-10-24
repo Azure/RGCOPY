@@ -76,5 +76,17 @@ bug fix| Exceeded CPU quota not always detected by RGCOPY. Resulting CPU usage o
 workflow| Revoking access from snapshots after BLOB copy. This was done in the past only when deleting snapshots (or automatically after 3 days)
 feature| Creating a public IP address when merging a VM that originally had at least one public IP address
 bug fix| Could not explicitly disable Disk Bursting, Write Accelerator, Accelerated Networking. Parameter value was always evaluated to True
-UI|Improved consistency checks for parameters:<BR>- skipVMs, skipDisks, skipSecurityRules, keepTags: checking for (disallowed) data type: array of array of string<BR>- archiveContainer: checking for upper case characters.<BR>- setAcceleratedNetworking: checking that NIC is not connected to NetApp volume
+UI|Improved consistency checks for parameters:<BR>- `skipVMs`, `skipDisks`, `skipSecurityRules`, `keepTags`: checking for (disallowed) data type: array of array of string<BR>- `archiveContainer`: checking for upper case characters.<BR>- `setAcceleratedNetworking`: checking that NIC is not connected to NetApp volume
+
+#### RGCOPY 0.9.38 October 2022
+type|change
+:---|:---
+bug fix| Regression when parameter `skipBastion` is used (one of 127 parameters): error during deployment "The resource 'Microsoft.Network/virtualNetworks/.../subnets/AzureBastionSubnet' is not defined in the template."
+feature| New experimental parameters:<BR>`diagSettingsSA`, `diagSettingsContainer`, `diagSettingsPub`, `diagSettingsProt`
+feature| New parameter switch `hostPlainText`<BR>Set this switch for getting better readable output when starting RGCOPY from a Linux script.
+bug fix| Increased minimum required PowerShell version to 7.2 (required for $PsStyle)
+feature| New parameter `justCopyDisks`
+feature| Improved quota check
+documentation|Clarification about moving customer SAP landscapes to a different region using RGCOPY.
+bug fix| RGCOPY exports an ARM template from the source RG and modifies it.<BR>**The structure of this exported ARM template has changed:**. It now contains circular dependencies between:<UL><LI>vnets and their subnet</LI><LI>network security groups and their rules</LI><LI>NAT Gateways and their Public IP Prefixes</LI></UL>Therefore, a workaround had to be implemented in RGCOPY. All older versions of RGCOPY do not work anymore (at least in some regions).
 
