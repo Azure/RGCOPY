@@ -1,5 +1,5 @@
 # RGCOPY documentation
-**Version: 0.9.38<BR>June 2022**
+**Version: 0.9.40<BR>December 2022**
 ***
 
 ### Introduction
@@ -142,7 +142,7 @@ Step|parameter<BR>skip switch|usage
 :clock1: *create snapshots*|**`skipSnapshots`**|This step creates snapshots of disks (and [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks)) in the source RG. During this time, VMs with more than one data disk must be stopped. See section [Application Consistency](./rgcopy-docu.md#Application-Consistency) for details. <BR> :bulb: **Tip:** When setting parameter switch **`stopVMsSourceRG`**, RGCOPY stops *all* VMs in the source RG before creating snapshots.
 :clock2: *create backups*|**`skipBackups`**|This step is only needed when using (or converting) [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) on LINUX. A file backup of specified mount points is created on an Azure SMB file share in the source RG.
 :clock3: *create BLOBs*|**`skipBlobs`**|This step is needed when the source RG and the target RG are not in the same region. The snapshots in the source RG are copied as [BLOBs](./rgcopy-docu.md#Parameters-for-BLOB-Copy) into a storage account in the target RG. Dependent on the disk sizes and the region, this might take several hours.
-:clock4: *deployment*|**`skipDeployment`**|The deployment consists of several part steps:<ul><li>*deploy VMs:* Deploy ARM template in the target RG.<BR>Part step can be skipped by **`skipDeploymentVMs`**</li><li>*restore backups:* Restore file backup on disks or [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) in the target RG if needed.<BR> Part step can be skipped by **`skipRestore`**</li><li>*deploy AMS:* Deploy [Azure Monitor for SAP](./rgcopy-docu.md#Azure-Monitor-for-SAP) if either parameter `createArmTemplateAms` or `pathArmTemplateAms` is set.</li><li>*install VM Extensions*: install [VM Extensions](./rgcopy-docu.md#VM-Extensions) if explicitly configured using RGCOPY parameters.<BR>Part step can be skipped by **`skipExtensions`**</li></ul>
+:clock4: *deployment*|**`skipDeployment`**|The deployment consists of several part steps:<ul><li>*deploy VMs:* Deploy ARM template in the target RG.<BR>Part step can be skipped by **`skipDeploymentVMs`**</li><li>*restore backups:* Restore file backup on disks or [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) in the target RG if needed.<BR> Part step can be skipped by **`skipRestore`**</li><li>*install VM Extensions*: install [VM Extensions](./rgcopy-docu.md#VM-Extensions) if explicitly configured using RGCOPY parameters.<BR>Part step can be skipped by **`skipExtensions`**</li></ul>
 :clock5: *start workload*| *optional step* | This step is used for testing SAP Workload. It has to be explicitly activated using switch **`startWorkload`**.
 :clock6: *cleanup*| *optional step* | By default, created snapshots are not deleted by RGCOPY. <BR>:bulb: **Tip:** you can activate a cleanup using RGCOPY parameters. See section [Cost Efficiency](./rgcopy-docu.md#Cost-Efficiency) for details.
 
@@ -237,16 +237,13 @@ The following resource configuration parameters exist:
 parameter|usage (data type is always [string] or [array])
 :---|:---
 **`setVmSize`** =<BR>`@("size@vm1,vm2,...", ...)`	|Set VM Size: <ul><li>**size**: VM size (e.g. Standard_E32s_v3) </li><li>**vm**: VM name</li></ul> 
-**`setDiskSku`** =<BR>`@("sku@disk1,disk2,...", ...)`			|Set Disk SKU: <ul><li>**sku** in {Premium_LRS, StandardSSD_LRS, Standard_LRS, Premium_ZRS, StandardSSD_ZRS} </li><li>**disk**: disk name</li></ul> 
+**`setDiskSku`** =<BR>`@("sku@disk1,disk2,...", ...)`			|Set Disk SKU (default value is **Premium_LRS**):  <ul><li>**sku** in {Premium_LRS, StandardSSD_LRS, Standard_LRS, Premium_ZRS, StandardSSD_ZRS} </li><li>**disk**: disk name</li></ul> :warning: **Warning:** If you want to avoid using the default value then you must explicitly set **setDiskSku** = `$Null`.
 **`setDiskSize`** = <BR>`@("size@disk1,disk1,...", ...)`			|Set Disk Size: <ul><li>**size** in GB </li><li>**disk**: disk name</li></ul> :warning: **Warning:** It's only possible to *increase* the size of a disk. Partitions on the disk are not changed. This parameter was originally intended for increasing disk I/O on the target RG. Nowadays, you better should use parameter `setDiskTier` instead.
 **`setDiskTier`** = <BR>`@("tier@disk1,disk1,...", ...)`			|Set Disk Performance Tier:<ul><li>**tier** in {P0, P1, ..., P80} </li><li>**disk**: disk name</li></ul>:memo: **Note:** To remove existing  performance tier configuration, set tier to P0.
 **`setDiskBursting`** = `@("bool@disk1,disk2,...", ...)`|Set Disk Bursting: <ul><li>**bool** in {True, False} </li><li>**disk**: disk name</li></ul> 
 **`setDiskMaxShares`** = <BR>`@("number@disk1,disk2,...", ...)`|Set maximum number of shares for a Shared Disk: <ul><li>**number** in {1, 2, 3, ...}  </li><li>**disk**: disk name </li></ul> :memo: **Note:** For number = 1, it is not a Shared Disk anymore
 **`setDiskCaching`** = <BR>`@("caching/wa@disk1,disk2...", ...)`	|Set Disk Caching: <ul><li>**caching** in {ReadOnly, ReadWrite, None} </li><li>**wa (writeAccelerator)** in {True, False} </li><li>**disk**: disk name</li></ul> :memo: **Examples:**<ul><li>`'ReadOnly'`: turns on ReadOnly cache for all disks</li><li>`'None/False'`: turns off caching and writeAccelerator for all disks</li><li>`'/False'`: turns off writeAccelerator for all disks (but keeps caching property)</li><li>`@('ReadOnly/True@disk1', '/False')`: turns on writeAccelerator (with ReadOnly cache) for disk1 and turns it off for all other disks in the resource group</li></ul>
 **`setVmDeploymentOrder`** = <BR>`@("prio@vm1,vm2,...", ...)`				|Set VM deployment Order: <ul><li>**prio** in {1, 2, 3, ...}  </li><li>**vm**: VM name </li></ul>:memo: **Note:** This parameter is used during ARM template creation. You can define priories for deploying VMs. A VM with higher priority (lower number) will be deployed before VMs with lower priority. Hereby, you can ensure that an important VM (for example a domain controller) will be deployed before other VMs.
-**`setLoadBalancerSku`** = <BR>`@("sku@lb1,lb2,...", ...)`	|Set Load Balancer SKU: <ul><li>**sku** in {Basic, Standard}</li><li>**lb (loadBalancer)**: Load Balancer name.</li></ul>
-**`setPublicIpSku`** = <BR>`@("sku@ip1,ip2,...", ...)`		|Set Public IP SKU: <ul><li>**sku** in {Basic, Standard} </li><li>**ip**: name of Public IP Address.</li></ul>
-**`setPublicIpAlloc`** = <BR>`@("allocation@ip1,ip2,...", ...)`		|Set Public IP Allocation Method: <ul><li>**allocation** in {Dynamic, Static}</li><li>**ip**: name of Public IP Address.</li></ul>
 **`setPrivateIpAlloc`** = <BR>`@("allocation@ip1,ip2,...", ...)`		|Set Private IP Allocation Method: <ul><li>**allocation** in {Dynamic, Static}</li><li>**ip**: name of Private IP Address.</li></ul>
 **`removeFQDN`** = <BR>`@("bool@ip1,ip2,...", ...)`		|Remove Fully Qualified Domain Names: <ul><li>**bool** in {True}</li><li>**ip**: name of Public IP Address.</li></ul>
 **`setAcceleratedNetworking`** = <BR>`@("bool@nic1,nic2,...", ...)`		|Set Accelerated Networking: <ul><li>**bool** in {True, False} </li><li>**nic**: name of Virtual Network Interface.</li></ul>
@@ -259,11 +256,14 @@ parameter|default value|default behavior
 :---|:---:|:---
 **`setDiskSku`**        |'Premium_LRS'   |converts all disks to Premium SSD<BR>(except Ultra SSD disks - they cannot be copied directly)
 **`setVmZone`**         |0             |removes zone configuration from VMs
-**`setLoadBalancerSku`**|'Standard'      |sets SKU of Load Balancers to Standard
 **`setPrivateIpAlloc`** |'Static'        |sets allocation of Private IP Addresses to Static
 **`setAcceleratedNetworking`**|$True    |enables Accelerated Networking
+**`removeFQDN`**|$True    |Removes the Fully Qualified Domain Name <BR>(even when `skipDefaultValues` is set)
 
-Parameter **`removeFQDN`** always has the default value `$True` (even when `skipDefaultValues` is set)
+In addition, RGCOPY always performs the following changes:
+- set the IP Allocation Method of Public IP Addresses to `Static`
+- set the SKU of Public IP Addresses to `Standard`
+- set the SKU of Load Balancers to `Standard`
 
 <div style="page-break-after: always"></div>
 
@@ -315,9 +315,10 @@ parameter|[DataType]: usage
 **`skipVmssFlex`**|**[switch]**: do not copy existing VM Scale Sets Flexible. <BR>Hereby, the target RG does not contain any VM Scale Set.
 **`skipAvailabilitySet`**|**[switch]**: do not copy existing Availability Sets. <BR>Hereby, the target RG does not contain any Availability Set.
 **`skipProximityPlacementGroup`**|**[switch]**: do not copy existing Proximity Placement Groups. <BR>Hereby, the target RG does not contain any Proximity Placement Group.
-**`createVmssFlex`** = <BR>`@("vmss/fault/zones@vm1,vm2,...", ...)`			|Create a VMSS Flex (VM Scale Set with Flexible orchestration mode) for given VMs: <ul><li>**vmss**: VM Scale Set Name </li><li>**fault**: Fault domain count in {none, 2, 3, max}.</li><li>**zones** Allowed Zones in {none, 1+2, 1+3, 2+3, 1+2+3}  </li><li>**vm**: VM name </li></ul>:memo: **Note:** When you are using this parameter for creating new VM Scale Sets then all existing VM Scale Sets are removed first.<BR>:warning: **Warning:** Either *zones* or *fault* must have the value *none*<BR>:bulb: **Tip:** A fault domain count of *max* automatically creates the maximum number of fault domains in the target region.
+**`createVmssFlex`** = <BR>`@("vmss/fault/zones@vm1,vm2,...", ...)`			|Create a VMSS Flex (VM Scale Set with Flexible orchestration mode) for given VMs: <ul><li>**vmss**: VM Scale Set Name </li><li>**fault**: Fault domain count in {none, 2, 3, max}.<BR>For SAP, fault domain count must always be `none`.</li><li>**zones** Allowed Zones in {none, 1+2, 1+3, 2+3, 1+2+3}  </li><li>**vm**: VM name </li></ul>:memo: **Note:** When you are using this parameter for creating new VM Scale Sets then all existing VM Scale Sets are removed first.<BR>:warning: **Warning:** Either *zones* or *fault* must have the value `none`.<BR>For SAP, *fault* must have the value `none`.<BR>:bulb: **Tip:** A fault domain count of *max* automatically creates the maximum number of fault domains in the target region.
+**`singlePlacementGroup`**|Set property `singlePlacementGroup` for all VMSS Flex.<BR>Allowed values in {`$Null`, `$True`, `$False`}<BR>Setting this parameter is normally not needed.
 **`createAvailabilitySet`** = <BR>`@("avset/fault/update@vm1,vm2,...", ...)`			|Create Azure Availability Set for given VMs:<ul><li>**avset**: Availability Set Name </li><li>**fault**: Fault domain count</li><li>**update**: Update domain count</li><li>**vm**: VM name </li></ul>:memo: **Note:** When you are using this parameter for creating new Availability Sets then all existing Availability Sets *and* Proximity Placement Groups are removed first.
-**`createProximityPlacementGroup`** = <BR>`@("ppg@res1,res2,...", ...)`			|Create Azure Proximity Placement Group for given VMs or Availability Sets: <ul><li>**ppg**: Proximity Placement Group Name </li><li>**res**: resource name (either VM or Availability Set) </li></ul>:memo: **Note:** When you are using this parameter for creating new Proximity Placement Groups then all existing Proximity Placement Groups *and* Availability Sets are removed first.<BR>:warning: **Warning:** You might use the same name for a VM and an Availability Set and add this name as resource name to this parameter. In this case, the VM as well as the Availability Set will be added to the Proximity Placement Group.
+**`createProximityPlacementGroup`** = <BR>`@("ppg@res1,res2,...", ...)`			|Create Azure Proximity Placement Group for given resources: <ul><li>**ppg**: Proximity Placement Group Name </li><li>**res**: resource name (either VM, Availability Set or VMSS Flex) </li></ul>:memo: **Note:** When you are using this parameter for creating new Proximity Placement Groups then all existing Proximity Placement Groups *and* Availability Sets are removed first.<BR>:warning: **Warning:** You might use the same name for a VM and an Availability Set and add this name as resource name to this parameter. In this case, the VM as well as the Availability Set will be added to the Proximity Placement Group.
 
 In Azure you cannot directly configure the Availability Zone for an Availability Set. However, you can indirectly pin an Availability Set to an Availability Zone. The trick is to deploy an additional VM that is in the Availability Zone. If this VM and the Availability Set are in the same Proximity Placement Group then they are also in the same Availability Zone. However, this only works if the VM is deployed first. If you deploy the Availability Set first then it might be deployed in a different Availability Zone. Afterwards, the deployment of the VM fails because the requirements for Availability Zone and Proximity Placement Group cannot be fulfilled at the same time. Luckily, you can define the deployment order in RGCOPY:
 
@@ -362,51 +363,6 @@ $rgcopyParameter = @{
     setVmZone = @(
         '1 @ hana1, ascs1, app1a, app1b',
         '2 @ hana2, ascs2, app2a, app2b'
-    )
-}
-.\rgcopy.ps1 @rgcopyParameter
-```
-
-An alternative for using Azure Availability Sets is using **VMSS Flex with fault domains**. In this case you can even define the fault domain individually per VM (which is not possible when using an Azure Availability Set). You cannot define the zone number in this case. However, all VMs of the VMSS Flex with fault domains are deployed in the same zone. This is much more flexible compared with an Availability Set (which would require that all VMs fit into the same cluster).
-
-Example of VMSS Flex **with fault domains**:
-
-```powershell
-$rgcopyParameter = @{
-    sourceRG        = 'SAP_master'
-    targetRG        = 'SAP_copy'
-    targetLocation  = 'westus'
-    
-    createVmssFlex = @(
-        'vmss/2/none @ hana1, hana2, ascs1, ascs2, app1a, app1b, app2a, app2b'
-    )
-    setVmFaultDomain = @(
-        '0 @ hana1, ascs1, app1a, app1b',
-        '1 @ hana2, ascs2, app2a, app2b'
-    )
-}
-.\rgcopy.ps1 @rgcopyParameter
-```
-
-When using more than one instance of VMSS Flex with fault domains, you can use a Proximity Placement Group for pinning them to the same zone (this is not possible for VMSS Flex with zones).
-
-Example of VMSS Flex **with fault domains** and **PPG**:
-
-```powershell
-$rgcopyParameter = @{
-    sourceRG        = 'SAP_master'
-    targetRG        = 'SAP_copy'
-    targetLocation  = 'westus'
-    
-	createProximityPlacementGroup = 'ppg @ vmss1, vmss2'
-
-	createVmssFlex = @(
-		'vmss1/2/none @ hana1, hana2',
-		'vmss2/2/none @ ascs1, ascs2, app1a, app1b, app2a, app2b'
-	)
-	setVmFaultDomain = @(
-		'0 @ hana1, ascs1, app1a, app1b',
-		'1 @ hana2, ascs2, app2a, app2b'
     )
 }
 .\rgcopy.ps1 @rgcopyParameter
@@ -459,7 +415,6 @@ parameter|[DataType]: usage
 :---|:---
 **`pathExportFolder`**<BR>|**[string]**: By default, RGCOPY creates all files in the user home directory. You can change the path for all RGCOPY files by setting parameter `pathExportFolder`.
 **`pathArmTemplate`**|**[string]**: You can deploy an existing (main) ARM template by setting this parameter. No snapshots are created, no ARM template is created and no resource configuration changes are possible.
-**`pathArmTemplateAms`**|**[string]**: You can provide an existing ARM template for deploying the AMS instance and providers. <BR>:warning: **Warning:** *Only* ARM templates that were created by RGCOPY can be used here because the ARM template parameter `amsInstanceName` is required.
 
 <div style="page-break-after: always"></div>
 
@@ -845,7 +800,6 @@ RGCOPY writes the working directory of `Invoke-AzVMRunCommand` to stdout respect
 ### Starting SAP
 For starting SAP, you must write your own script. This script must contain `systemctl start sapinit` if you are using NetApp volumes. The path of the script has to be specified using parameter `scriptStartSapPath` (see above). This script will be started by RGCOPY in the following cases:
 1. In the source RG: before running the local script specified by parameter `pathPreSnapshotScript`
-2. In the target RG: before installing an AMS instance
 3. In the target RG: before running the local script specified by parameter `pathPostDeploymentScript`
 4. In the target RG: at the beginning of step *Workload and Analysis* (if parameter `startWorkload` is set)
 
@@ -887,6 +841,9 @@ $rgcopyParameter = @{
 
 ### Merging and Cloning VMs
 Normally, RGCOPY is used for copying all resources of a source RG into a new (or empty) target RG. By using parameter `setVmMerge` you can copy discrete VMs and attach them to an existing subnet in the target RG. You can use this to copy a standard VM (e.g. jump box) into several other resource groups.
+
+> :warning: **Warning:** `setVmMerge` is an experimental parameter that might or might not work.
+
 By using parameter `setVmName`, you can rename the VMs in the target RG. Herby, you can copy a VM even in the source RG (source RG = target RG). The VM disks are automatically renamed. You might use this for cloning application servers. Be aware that parameter `setVmName` does not rename the VM on OS level.
 
 parameter|[DataType]: usage
@@ -920,28 +877,6 @@ parameter|[DataType]: usage
 **`installExtensionsAzureMonitor`** |**[array]**: Names of VMs for deploying the Azure Agents<BR>(AzureMonitorWindowsAgent or AzureMonitorLinuxAgent).<BR>The Azure Agent is intalled on all VMs when setting the parameter to `@('*')`
 **`installExtensionsSapMonitor`** |**[array]**: Names of VMs for deploying the SAP Monitor Extension.<BR>Alternatively, you can set the Azure tag `rgcopy.Extension.SapMonitor` for the VM. If you do not want to install the SAP Monitor Extension although the Azure tag has been set, use switch `ignoreTags`.
 
-### Azure Monitor for SAP
-RGCOPY can copy *up to one* AMS instance and multiple AMS providers. For installing the SapHana provider, SAP HANA must already be running. However, this is not guarantied during the ARM deployment. Therefore, RGCOPY creates a separate ARM template just for the AMS instance and providers. This ARM template will be deployed in the target RG after SAP HANA has been started. Therefore, RGCOPY is using the script `scriptStartSapPath` as described above.
-
->:warning: **Warning:** **Azure Monitor for SAP (AMS) is currently in public review with version v1. Version v2 will probably be in public review in 2022. RGCOPY only supports version v1. Once version v2 is available, RGCOPY might remove its support for AMS completely.**
-
-The following RGCOPY parameters exist for AMS:
-parameter|[DataType]: usage
-:---|:---
-**`createArmTemplateAms`**|**[switch]**: Export an ARM template for the AMS resources from the source RG.<BR>If you want to copy the AMS instance and providers then you must either use parameter `createArmTemplateAms` or `pathArmTemplateAms`.
-**`pathArmTemplateAms`**|**[string]**: Use an exsisting AMS ARM template for deploying AMS in the target RG
-**`amsInstanceName`**|**[string]**: Name of the AMS instance in the target RG.<BR>When not setting this parameter, RGCOPY calculates an AMS instance name based on the target RG name.
-**`amsWsName`** |**[string]**: Name of an existing log analytics workspace that should be used by AMS.<BR>If not set, then AMS creates a new workspace in the managed resource group.
-**`amsWsRG`**   |**[string]**: Resource group name of the existing log analytics workspace used by AMS. <BR>It must be in the target subscription.
-**`amsWsKeep`** |**[switch]**: By setting this switch, the AMS instance in the target RG is using the same log analytics workspace as the source RG. No new workspace is created. Parameters `amsWsName` and `amsWsRG`are ignored.
-**`amsShareAnalytics`**  |**[switch]**: When setting this switch then AMS enables Customer Analytics. In this case, collected AMS data is visible for Microsoft support. This is not the case by default (without setting this switch).
-**`dbPassword`**|**[SecureString]**: For AMS providers SapHana and MsSqlServer, you must provide the database password to RGCOPY as a secure string as follows:<BR>`dbPassword = (ConvertTo-SecureString -String 'secure-password' -AsPlainText -Force)`
-**`amsUsePowerShell`**|**[boolean]**: (default value: \$True): This parameter just defines, *how* RGCOPY is installing AMS:<ul><li>When set to **\$False**, then RGCOPY uses an ARM template for installing AMS. In this case, the PowerShell module *Az.HanaOnAzure* is not needed. The parameter `dbPassword` must be supplied during ARM template *creation*. Be aware, that the created ARM template contains the **password in plain text**. This is not the case when parameter `amsUsePowerShell` is not used.</li><li>When set to **\$True**, then RGCOPY uses PowerShell cmdlets for installing AMS. In this case, the newest version of the PowerShell module Az.HanaOnAzure must be installed. The parameter `dbPassword` must be supplied during ARM template *deployment*.</li></ul>
-
-### Virtual Network Peerings for AMS in the source RG
-RGCOPY can copy Azure virtual network peerings for AMS instances. This is useful because AMS is only supported in some specific regions yet, for example in eastus. If your resource group is located in an unsupported region then you can create an AMS instance in an additional virtual network in a supported region. Afterwards, you create a network peering between your main virtual network and the additional virtual network. **The AMS instance and all virtual networks must be located in the source RG.** RGCOPY does not support an AMS instance for monitoring resources in different resource groups. However, AMS instances in different resource groups can share the same log analytics workspace.
-
-
 ### Cost Efficiency
 You can save Azure costs by using RGCOPY [Archive Mode](./rgcopy-docu.md#Archive-Mode) and [Update Mode](./rgcopy-docu.md#Update-Mode) as described above. This chapter describes how to save costs caused by RGCOPY.
 
@@ -957,7 +892,7 @@ parameter|[DataType]: usage
 **`stopVMsTargetRG`** |**[switch]**: When setting this switch in **Copy Mode**, RGCOPY stops all VMs in the target RG after deploying it. Typically, this is not what you want. However, it might be useful for saving costs when deploying a resource group that is not used immediately.
 
 Tip: You can use the following RGCOPY parameters for reducing cost in the target RG: `setVmSize`, `setDiskSku`, `setDiskTier`, `createDisksTier`, `netAppServiceLevel`, `netAppPoolGB`, `smbTier`, and `skipBastion`.
-The *default* values of some RGCOPY parameters also have some cost impact. See parameters `createDisksTier`, `setDiskSku`, and `setLoadBalancerSku` above.
+The *default* values of some RGCOPY parameters also have some cost impact. See parameters `createDisksTier` and `setDiskSku` above.
 
 The behavior of RGCOPY changed for copying NetApp volumes or Ultra SSD disks. It now starts only *needed* Ms in the source RG. These VMs are stopped again by RGCOPY. In earlier versions of RGCOPY *all* VMs were started in the source RG and you had to stop them on your own.
 
@@ -987,8 +922,6 @@ The following ARM resources are copied from the source RG:
 - Microsoft.Network/bastionHosts
 - Microsoft.Network/natGateways
 - Microsoft.Network/publicIPPrefixes
-- Microsoft.HanaOnAzure/sapMonitors
-- Microsoft.HanaOnAzure/sapMonitors/providerInstances
 
 **\* RGCOPY does not support** Microsoft.Network/loadBalancers/**loadBalancerInboundNatRules** yet
 
@@ -1045,7 +978,6 @@ file|*[DataType]*: usage
 :---|:---
 `rgcopy.<source_RG>.SOURCE.json`|Exported ARM template(s) from the source RG(s).
 `rgcopy.<target_RG>.TARGET.json`<BR>`rgcopy.<source_RG>.TARGET.json`|ARM template which is generated by RGCOPY<BR>*Ditto* when using **Archive Mode**
-`rgcopy.<target_RG>.AMS.json`<BR><BR>`rgcopy.<source_RG>.AMS.json`|ARM template for Azure Monitor for SAP (AMS).<BR>It will only be created if the source RG contains an AMS Instance.<BR>*Ditto* when using **Archive Mode**
 `rgcopy.<target_RG>.TARGET.log`<BR>`rgcopy.<source_RG>.SOURCE.log`|Standard RGCOPY log file<BR>*Ditto* when using **Update Mode**
 `rgcopy.txt`|Backup of the running script rgcopy.ps1 used for support
 `rgcopy.<source_RG>.RESTORE.ps1.txt`|Generated PowerShell script when using **Archive Mode**

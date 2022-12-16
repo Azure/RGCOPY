@@ -6,7 +6,7 @@
 RGCOPY relies on several PowerShell modules. A malfunction of these modules might directly result in a failure of RGCOPY. Therefore, you should make sure that you always use the newest version of:
 
 - PowerShell
-- PowerShell modules **Az**, **Az.NetAppFiles** and **Az.HanaOnAzure**
+- PowerShell modules **Az** and **Az.NetAppFiles**
 - RGCOPY
 
 #### Analyze deployment errors

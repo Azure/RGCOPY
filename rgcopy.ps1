@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.38
-version date:     October 2022
+version:          0.9.40
+version date:     December 2022
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 Microsoft intern: https://github.com/Azure/RGCOPY-MS-intern
@@ -110,23 +110,9 @@ param (
 	# file locations
 	#--------------------------------------------------------------
 	,[string] $pathArmTemplate								# given ARM template file
-	,[string] $pathArmTemplateAms							# given ARM template file for AMS deployment
 	,[string] $pathExportFolder	 = '~'						# default folder for all output files (log-, config-, ARM template-files)
 	,[string] $pathPreSnapshotScript						# running before ARM template creation on sourceRG (after starting VMs and SAP)
 	,[string] $pathPostDeploymentScript						# running after deployment on targetRG
-
-	#--------------------------------------------------------------
-	# AMS and script parameter
-	#--------------------------------------------------------------
-	# AMS (Azure Monitoring for SAP) parameters
-	,[switch] $createArmTemplateAms							# create AMS ARM template and deploy AMS
-	,[string] $amsInstanceName								# Name of AMS instance to be created in the target RG
-	,[string] $amsWsName									# Name of existing Log Analytics workspace for AMS
-	,[string] $amsWsRG										# Resource Group of existing Log Analytics workspace for AMS
-	,[switch] $amsWsKeep									# Keep existing Log Analytics workspace of sourceRG
-	,[switch] $amsShareAnalytics							# Sharing Customer Analytics Data with Microsoft
-	,[SecureString] $dbPassword			# = (ConvertTo-SecureString -String 'secure-password' -AsPlainText -Force)
-	,[boolean] $amsUsePowerShell = $True					# use PowerShell cmdlets rather than ARM template for AMS deployment
 
 	# script location of shell scripts inside the VM
 	,[string] $scriptStartSapPath							# if not set, then calculated from vm tag rgcopy.ScriptStartSap
@@ -249,6 +235,7 @@ param (
 	#	with $vmss:  name of VM Scale Set Flexible
 	#        $zones: Allowed Zones in {none, 1+2, 1+3, 2+3, 1+2+3}
 	#        $fault: Fault domain count in in {none, 2, 3, max}
+	,$singlePlacementGroup # in {Null, True, False}
 
 	,$createAvailabilitySet = @()
 	# usage: $createAvailabilitySet = @("$avSet/$fd/$ud$@$vm1,$vm2,...", ...)
@@ -298,18 +285,6 @@ param (
 	#	with $net as virtual network name, $subnet as subnet name in target resource group
 	# merge VM jumpbox into target RG:					@("vnet/default@jumpbox")
 
-	,$setLoadBalancerSku = 'Standard'				# default value in COPY MODE
-	# usage: $setLoadBalancerSku = @("$sku@$loadBalancer1,$loadBalancer12,...", ...)
-	#	with $sku -in @('Basic', 'Standard')
-
-	,$setPublicIpSku = @()
-	#usage: $setPublicIpSku = @("$sku@$ipName1,$ipName12,...", ...)
-	#	with $sku -in @('Basic', 'Standard')
-
-	,$setPublicIpAlloc = @()
-	# usage: $setPublicIpAlloc = @("$allocation@$ipName1,$ipName12,...", ...)
-	#	with $allocation -in @('Dynamic', 'Static')
-
 	,$setPrivateIpAlloc	= 'Static'					# default value in COPY MODE
 	# usage: $setPrivateIpAlloc = @("$allocation@$ipName1,$ipName12,...", ...)
 	#	with $allocation -in @('Dynamic', 'Static')
@@ -347,9 +322,6 @@ param (
 	#--------------------------------------------------------------
 	# experimental parameters: DO NOT USE!
 	#--------------------------------------------------------------
-	# use Parameter Set updateMode when switch justRedeployAms is set
-	,[Parameter(ParameterSetName='updateMode')]
-	 [switch] $justRedeployAms
 	,$setVmTipGroup			= @()
 	,$setGroupTipSession	= @()
 	,[switch] $allowRunningVMs
@@ -397,9 +369,6 @@ $variableTypeParameters = @(
 	'setDiskBursting',
 	'setDiskCaching',
 	'setAcceleratedNetworking',
-	'setLoadBalancerSku',
-	'setPublicIpSku',
-	'setPublicIpAlloc',
 	'setPrivateIpAlloc',
 	'removeFQDN',
 	'createProximityPlacementGroup',
@@ -435,7 +404,6 @@ $workflowParameters = @(
 	'justStopCopyBlobs',
 	'justCreateSnapshots',
 	'justDeleteSnapshots',
-	'justRedeployAms',
 	'skipStartSAP'
 )
 
@@ -459,7 +427,7 @@ else {
 }
 
 # process only sourceRG ?
-if ($updateMode -or $justCreateSnapshots -or $justDeleteSnapshots -or $justRedeployAms) {
+if ($updateMode -or $justCreateSnapshots -or $justDeleteSnapshots) {
 	$targetRG = $sourceRG
 	$enableSourceRgMode = $True
 	$rgcopyMode = 'Update Mode'
@@ -615,30 +583,6 @@ function test-names {
 	}
 	else {
 		test-match 'netAppPoolName' $script:netAppPoolName $match
-	}
-
-	#--------------------------------------------------------------
-	# amsInstanceName
-	# Can include alphanumeric (,underscore, hyphen)
-	# length: 6-30
-	$match = '^[a-zA-Z0-9_\-]{6,30}$'
-
-	if ($script:amsInstanceName.Length -eq 0) {
-		$name = $script:targetRG -replace '[_\.\-\(\)]', '-'  -replace '\-+', '-' `
-
-		# truncate name
-		$len = (30, $name.Length | Measure-Object -Minimum).Minimum
-		$name = $name.SubString(0,$len)
-
-		# name too short
-		if ($len -lt 6) {
-			$name += '-ams-inst'
-		}
-
-		$script:amsInstanceName = $name
-	}
-	else {
-		test-match 'amsInstanceName' $script:amsInstanceName $match
 	}
 
 	#--------------------------------------------------------------
@@ -1185,6 +1129,9 @@ function write-logFileHashTable {
 
 		$paramKey   = $_.Key
 		$paramValue = $_.Value
+		if (($paramValue -is [array]) -and ($paramValue.length -eq 0)) {
+			$paramValue = $Null
+		}
 
 		# array
 		if ($paramValue -is [array]) {
@@ -2070,6 +2017,7 @@ function save-skuProperties {
 # save properties of each VM size
 	$script:vmSkus = @{}
 
+	$script:MaxRegionFaultDomains = 3
 	if ($skipVmChecks) { return }
 
 	$savedSub = $script:currentSub
@@ -2093,7 +2041,7 @@ function save-skuProperties {
 		$script:MaxRegionFaultDomains = `
 			($_.Capabilities | Where-Object Name -eq 'MaximumPlatformFaultDomainCount').Value -as [int]
 	}
-	if ($script:MaxRegionFaultDomains -eq 0) {
+	if ($script:MaxRegionFaultDomains -le 0) {
 		write-logFileWarning "Could not get MaximumPlatformFaultDomainCount for region '$targetLocation'"
 		$script:MaxRegionFaultDomains = 2
 	}
@@ -3708,6 +3656,7 @@ function update-paramSetVmTipGroup {
 	}
 
 	# update from tag (if parameter setVmTipGroup was NOT used)
+	$numberTags = 0
 	if (($setVmTipGroup.count -eq 0) `
 	-and ($createVmssFlex.count -eq 0) `
 	-and ($createAvailabilitySet.count -eq 0) `
@@ -3721,8 +3670,17 @@ function update-paramSetVmTipGroup {
 			$tipGroup = $_.Tags.$azTagTipGroup -as [int]
 			if ($tipGroup -gt 0) {
 				$_.Group = $tipGroup
+				$numberTags++
 			}
 		}
+	}
+
+	if ($numberTags -gt 0) {
+		write-logFileWarning "VM Tag 'rgcopy.TipGroup' was used" `
+							"Use RGCOPY parameter 'ignoreTags' for preventing this"
+
+		write-logFileWarning "ProximityPlacementGroups, AvailabilitySets and VmssFlex are removed" `
+							"Use RGCOPY parameter 'ignoreTags' for preventing this"
 	}
 
 	$script:tipVMs = convertTo-array (($script:copyVMs.values | Where-Object Group -gt 0).Name)
@@ -5632,98 +5590,32 @@ function update-NICs {
 #--------------------------------------------------------------
 function update-SKUs {
 #--------------------------------------------------------------
-	set-parameter 'setLoadBalancerSku' $setLoadBalancerSku 'Microsoft.Network/loadBalancers'
 	# process loadBalancers
 	$script:resourcesALL
 	| Where-Object type -eq 'Microsoft.Network/loadBalancers'
 	| ForEach-Object -Process {
 
-		$value = $script:paramValues[$_.name]
-		if ($Null -ne $value) {
-			test-values 'setLoadBalancerSku' $value @('Basic', 'Standard') 'sku'
-
-			$old = $Null
-			if ($Null -ne $_.sku) {
-				$old = $_.sku.name
-			}
-
-			if ($old -ne $value) {
-				write-logFileUpdates 'loadBalancers' $_.name 'set SKU' $value
-				$_.sku = @{ name = $value }
-				$script:countLoadBalancerSku++
-			}
-			else {
-				write-logFileUpdates 'loadBalancers' $_.name 'keep SKU' $value
-			}
+		if ($_.sku.name -ne 'Standard') {
+			write-logFileUpdates 'loadBalancers' $_.name 'set SKU' 'Standard'
+			$_.sku = @{ name = 'Standard' }
 		}
 	}
 
-	set-parameter 'setPublicIpSku' $setPublicIpSku 'Microsoft.Network/publicIPAddresses'
-	# process publicIPAddresses
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Network/publicIPAddresses'
-	| ForEach-Object -Process {
+	# # remove SKU from bastionHosts (used to be required during rollout of SKU)
+	# $script:resourcesALL
+	# | Where-Object type -eq 'Microsoft.Network/bastionHosts'
+	# | ForEach-Object -Process {
 
-		$value = $script:paramValues[$_.name]
-		if ($Null -ne $value) {
-			test-values 'setPublicIpSku' $value @('Basic', 'Standard') 'sku'
-
-			$old = $Null
-			if ($Null -ne $_.sku) {
-				$old = $_.sku.name
-			}
-
-			if ($old -ne $value) {
-				write-logFileUpdates 'publicIPAddresses' $_.name 'set SKU' $value
-				$_.sku = @{ name = $value }
-			}
-			else {
-				write-logFileUpdates 'publicIPAddresses' $_.name 'keep SKU' $value
-			}
-		}
-	}
-
-	# remove SKU from bastionHosts
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Network/bastionHosts'
-	| ForEach-Object -Process {
-
-		if ($_.sku.count -ne 0) {
-			$_.sku = $Null
-			write-logFileUpdates 'bastionHosts' $_.name 'delete Sku' '' '' '(SKU not supported in all regions)'
-		}
-	}
+	# 	if ($_.sku.count -ne 0) {
+	# 		$_.sku = $Null
+	# 		write-logFileUpdates 'bastionHosts' $_.name 'delete Sku' '' '' '(SKU not supported in all regions)'
+	# 	}
+	# }
 }
 
 #--------------------------------------------------------------
 function update-IpAllocationMethod {
 #--------------------------------------------------------------
-	set-parameter 'setPublicIpAlloc' $setPublicIpAlloc 'Microsoft.Network/publicIPAddresses'
-	# process publicIPAddresses
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Network/publicIPAddresses'
-	| ForEach-Object -Process {
-
-		$value = $script:paramValues[$_.name]
-		if ($Null -ne $value) {
-			test-values 'setPublicIpAlloc' $value @('Dynamic', 'Static') 'allocation type'
-
-			if ($_.properties.publicIPAllocationMethod -ne $value) {
-				$_.properties.publicIPAllocationMethod = $value
-				write-logFileUpdates 'publicIPAddresses' $_.name 'set Allocation Method' $value
-			}
-			else {
-				write-logFileUpdates 'publicIPAddresses' $_.name 'keep Allocation Method' $value
-			}
-		}
-
-		# remove IP Address VALUE (for Static AND Dynamic)
-		if ($_.properties.ContainsKey('ipAddress')) {
-			write-logFileUpdates 'publicIPAddresses' $_.name 'delete old ipAddress' '' '' $_.properties.ipAddress
-			$_.properties.Remove('ipAddress')
-		}
-	}
-
 	set-parameter 'setPrivateIpAlloc' $setPrivateIpAlloc 'Microsoft.Network/networkInterfaces'
 	# process networkInterfaces
 	$script:resourcesALL
@@ -6148,64 +6040,88 @@ function update-FQDN {
 }
 
 #--------------------------------------------------------------
-function new-vmssFlex {
+function get-vmssFlex {
 #--------------------------------------------------------------
-	# fill [hashtable] $script:paramValues
-	set-parameter 'createVmssFlex ' $createVmssFlex 'Microsoft.Compute/virtualMachines'
-	$script:vmssProperties = @{}
-	$deleted = @()
-	$remaining = @()
-	$created = @()
-	$max = $script:MaxRegionFaultDomains
-
-	#--------------------------------------------------------------
-	# remove vmss
+	$script:deletedVmss = @()
+	
 	$script:resourcesALL
 	| Where-Object type -eq 'Microsoft.Compute/virtualMachineScaleSets'
 	| ForEach-Object {
 
-		if ($skipVmssFlex -or ($_.properties.orchestrationMode -ne 'Flexible')) {
-			write-logFileUpdates 'vmScaleSets' $_.name 'delete'
-			$deleted += $_.name
+		$vmssName = $_.name
+		$faultDomainCount = $_.properties.platformFaultDomainCount
+		if ($faultDomainCount -lt 2) {
+			$faultDomainCount = 1
 		}
+
+		# remove unneeded VMSS
+		if ($skipVmssFlex -or ($_.properties.orchestrationMode -ne 'Flexible')) {
+
+			write-logFileUpdates 'vmScaleSets' $_.name 'delete'
+			$script:deletedVmss += $_.name
+		}
+
+		# get existing VMSS
 		else {
-			$remaining += $_.name
+			$properties = "(FD Count=$faultDomainCount; Zones=$($_.zones -as [string]))"
+
+			write-logFileUpdates 'vmScaleSets' $_.name 'keep' $properties
+
+			# save properties of existing VMSS
+			$script:vmssProperties[$vmssName] = @{
+				name				= $vmssName
+				faultDomainCount	= $faultDomainCount
+				zones				= $_.zones
+			}
 		}
 	}
 
-	if (($remaining.count -ne 0) -and ('setVmZone' -notin $boundParameterNames)) {
+	if (($script:vmssPropertie.count -ne 0) -and ('setVmZone' -notin $boundParameterNames)) {
 		# write-logFileWarning "VM Scale Sets exists and parameter 'setVmZone' is not set" `
 		# 					"Default value 'none' of parameter 'setVmZone' is not used"
 		$script:setVmZone = @()
 	}
 
-	# delete resource
-	foreach ($vmss in $deleted) {
+	# delete unneeded resources
+	foreach ($vmss in $script:deletedVmss) {
 		remove-resources 'Microsoft.Compute/virtualMachineScaleSets' $vmss
 	}
 	# vmss FLEX does not have this subresource (although it is exported from source RG)
 	remove-resources 'Microsoft.Compute/virtualMachineScaleSets/virtualMachines'
 
-	# update VMs (remove vmss)
+	#--------------------------------------------------------------
+	# update VMs for VMSS Flex
 	$script:resourcesALL
 	| Where-Object type -eq 'Microsoft.Compute/virtualMachines'
 	| ForEach-Object {
 
+		$vmName = $_.name
 		$id = $_.properties.virtualMachineScaleSet.id
 		if ($Null -ne $id) {
-			$vmss = (get-resourceComponents $id).mainResourceName
-			if ($vmss -in $deleted) {
+			$vmssName = (get-resourceComponents $id).mainResourceName
 
-				write-logFileUpdates 'virtualMachines' $_.name 'remove vmScaleSet'
+			# vmss not found in same resource group
+			if ($vmssName -notin $script:vmssProperties.values.name) {
+				# remove vmss from VM
 				$_.properties.virtualMachineScaleSet = $Null
-				$_.properties.platformFaultDomain = $Null
 				$_.dependsOn = remove-dependencies $_.dependsOn 'Microsoft.Compute/virtualMachineScaleSets'
+			}
+
+			# save VMSS name
+			else {
+				$script:copyVMs[$vmName].VmssName = $vmssName
 			}
 		}
 	}
+}
 
-	#--------------------------------------------------------------
-	# create new vmssFlex
+#--------------------------------------------------------------
+function new-vmssFlex {
+#--------------------------------------------------------------
+	$createdVmss = @()
+
+	# fill [hashtable] $script:paramValues
+	set-parameter 'createVmssFlex ' $createVmssFlex 'Microsoft.Compute/virtualMachines'
 	foreach ($config in $script:paramAllConfigs) {
 
 		$vmssName		= $config.paramConfig1
@@ -6233,15 +6149,15 @@ function new-vmssFlex {
 			$numDomains = 1
 		}
 		elseif ($faultDomains -eq 'max') {
-			$numDomains = $max
+			$numDomains = $script:MaxRegionFaultDomains
 		}
 		else {
 			$numDomains = $faultDomains -as [int]
 		}
 
-		if ($numDomains -gt $max) {
-			write-logFileWarning "Region '$targetLocation' only supports $max fault domains"
-			$numDomains = $max
+		if ($numDomains -gt $script:MaxRegionFaultDomains) {
+			write-logFileWarning "Region '$targetLocation' only supports $script:MaxRegionFaultDomains fault domains"
+			$numDomains = $script:MaxRegionFaultDomains
 		}
 
 		# create ARM resource
@@ -6266,100 +6182,252 @@ function new-vmssFlex {
 			$res.zones = $zoneArray
 		}
 
-		# save properties for setMergeVMs
+		# save ARM resource
+		if (($vmssName -notin $createdVmss) -and ($setVmMerge.count -eq 0)) {
+			$createdVmss += $vmssName
+			$properties = "(FD Count=$numDomains; Zones=$($zoneArray -as [string]))"
+			write-logFileUpdates 'vmScaleSets' $vmssName 'create' $properties
+			[array] $script:resourcesALL += $res
+		}
+
+		# save properties of new VMSS
 		$script:vmssProperties[$vmssName] = @{
+			name				= $vmssName
 			faultDomainCount	= $numDomains
 			zones				= $zoneArray
 		}
 
-		# VMSS has not been already created
-		# (the same name might occur 2 times in the RGCOPY array-parameter)
-		if (($vmssName -notin $created) -and ($setVmMerge.count -eq 0)) {
-			$created += $vmssName
-			write-logFileUpdates 'vmScaleSets' $vmssName 'create'
-			[array] $script:resourcesALL += $res
+		# update VMs with new vmss
+		$script:resourcesALL
+		| Where-Object type -eq 'Microsoft.Compute/virtualMachines'
+		| ForEach-Object {
+
+			$vmName = $_.name
+			$vmssName, $x = $script:paramValues[$vmName] -split '/'
+
+			if ($vmssName.length -ne 0) {
+
+				# get ID function
+				$vmssID = get-resourceFunction `
+							'Microsoft.Compute' `
+							'virtualMachineScaleSets'	$vmssName
+
+				# set property
+				$_.properties.virtualMachineScaleSet = @{ id = $vmssID }
+
+				# add new dependency
+				[array] $_.dependsOn += $vmssID
+
+				# save VMSS name
+				$script:copyVMs[$vmName].VmssName = $vmssName
+			}
 		}
 	}
+}
 
-	#--------------------------------------------------------------
-	# update VMs with new vmss
-	#   zone will be set by parameter setVmZone
-	#   platformFaultDomain will be set by parameter setVmFaultDomain
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Compute/virtualMachines'
-	| ForEach-Object {
-
-		$vmName = $_.name
-		$vmssName, $x = $script:paramValues[$vmName] -split '/'
-
-		if ($vmssName.length -ne 0) {
-
-			# get ID function
-			$vmssID = get-resourceFunction `
-						'Microsoft.Compute' `
-						'virtualMachineScaleSets'	$vmssName
-
-			# set property
-			$_.properties.virtualMachineScaleSet = @{ id = $vmssID }
-			write-logFileUpdates 'virtualMachines' $vmName 'set vmScaleSet' $vmssName
-
-			# add new dependency
-			[array] $_.dependsOn += $vmssID
-		}
-	}
-
-	#--------------------------------------------------------------
+#--------------------------------------------------------------
+function update-faultDomainCount {
+#--------------------------------------------------------------
 	# update fault domain count (of new and existing VMSS)
 	$script:resourcesALL
 	| Where-Object type -eq 'Microsoft.Compute/virtualMachineScaleSets'
 	| ForEach-Object -Process {
 
 		# check fault domain count
-		if ($_.properties.platformFaultDomainCount -gt $max ) {
-			write-logFileWarning "The maximum fault domain count in region '$targetLocation' is $max" -stopWhenForceVmChecks
-			write-logFileUpdates 'vmScaleSets' $_.name 'set faultDomainCount' $max
-			$_.properties.platformFaultDomainCount = $max
+		if ($_.properties.platformFaultDomainCount -gt $script:MaxRegionFaultDomains ) {
+			$_.properties.platformFaultDomainCount = $script:MaxRegionFaultDomains
+			$script:vmssProperties[$_.name].faultDomainCount = $script:MaxRegionFaultDomains
+			write-logFileWarning "The maximum fault domain count in region '$targetLocation' is $script:MaxRegionFaultDomains" -stopWhenForceVmChecks
+			write-logFileUpdates 'vmScaleSets' $_.name 'set faultDomainCount' $script:MaxRegionFaultDomains
+		}
+	}
+}
+
+#--------------------------------------------------------------
+function update-vmFaultDomain {
+#--------------------------------------------------------------
+	# process RGCOPY parameter
+	set-parameter 'setVmFaultDomain' $setVmFaultDomain
+	get-ParameterRule
+	while ($Null -ne $script:paramConfig) {
+
+		$faultDomain = $script:paramConfig
+		test-values 'setVmFaultDomain' $faultDomain @('none', '0', '1', '2') 'faultDomain'
+		# convert to internal syntax
+		if ($faultDomain -eq 'none') {
+			$faultDomain = -1
+		}
+		$faultDomain = $faultDomain -as [int]
+
+		$script:copyVMs.values
+		| Where-Object Name -in $script:paramVMs
+		| ForEach-Object {
+
+			$_.PlatformFaultDomainNew = $faultDomain
+		}
+		get-ParameterRule
+	}
+
+	$script:MseriesWithFaultDomain = $False
+
+	# output of changes
+	$script:copyVMs.Values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		$vmName 	= $_.Name
+		$vmssName	= $_.VmssName
+
+		$current	= $_.PlatformFaultDomain
+		$wanted		= $_.PlatformFaultDomainNew
+		if ($Null -eq $wanted) {
+			$wanted = $current
 		}
 
-		# save properties
-		$script:vmssProperties[$_.name] = @{
-			faultDomainCount	= $_.properties.platformFaultDomainCount
-			zones				= $_.zones
+		# check for vmss
+		if (($Null -eq $vmssName) -and ($wanted -ne -1)) {
+			write-logFileWarning "VM '$vmName' is not part of a VM Scale Set"
+			$wanted = -1
+		}
+
+		# check for maximum value
+		if ($Null -ne $vmssName) {
+			$max = $script:vmssProperties[$vmssName].faultDomainCount
+			if (($max -le 1) -and ($wanted -ne -1)) {
+				write-logFileWarning "VM Scale Set '$vmssName' does not support fault domains"
+				$wanted = -1
+			}
+			if ($wanted -ge $max) {
+				write-logFileWarning "VM Scale Set '$vmssName' only supports $max fault domains"
+				$wanted = -1
+			}
+		}
+
+		# get M-series
+		if ($Null -ne $vmssName) {
+			if ($_.VmSize -like 'Standard_M*') {
+				# save VM size property
+				$script:vmssProperties[$vmssName].SeriesM = $True
+
+				if ($wanted -ne -1) {
+					$script:MseriesWithFaultDomain = $True
+				}
+			}
+			else {
+				# save VM size property
+				$script:vmssProperties[$vmssName].SeriesOther = $True
+			}
+		}
+
+
+		# update
+		$_.PlatformFaultDomain = $wanted
+
+		# output
+		if ($current -ne $wanted) {
+			$action = 'set'
+		}
+		else {
+			$action = 'keep'
+		}
+		if ($_.PlatformFaultDomain -eq -1) {
+			write-logFileUpdates 'virtualMachines' $vmName "$action fault domain" 'none' -defaultValue
+		}
+		else {
+			write-logFileUpdates 'virtualMachines' $vmName "$action fault domain" $_.PlatformFaultDomain
 		}
 	}
 
-	# update fault domain in VMs
+	# update VM ARM resources
 	$script:resourcesALL
 	| Where-Object type -eq 'Microsoft.Compute/virtualMachines'
 	| ForEach-Object {
 
-		$vmName  = $_.name
-		$current = $_.properties.platformFaultDomain
-		if ($Null -eq $current) {
-			$current = -1
-		}
-		$current = $current -as [int]
+		$vmName = $_.name
+		$platformFaultDomain = $script:copyVMs[$vmName].PlatformFaultDomain
 
-		# check fault domain count
-		if ($current -ge $max) {
-			write-logFileWarning "Region '$targetLocation' only supports $max Fault Domains"
-			write-logFileUpdates 'virtualMachines' $vmName "$action fault domain" 'none' -defaultValue
+		# update platformFaultDomain
+		if ($platformFaultDomain -lt 0) {
 			$_.properties.platformFaultDomain = $Null
-			$script:copyVMs[$vmName].PlatformFaultDomain = -1
 		}
-		if (($current -ge 0) -and ($Null -eq $_.properties.virtualMachineScaleSet.id)){
-			write-logFileWarning "VM '$vmName' is not member of a VM Scale Set"
-			write-logFileUpdates 'virtualMachines' $vmName "$action fault domain" 'none' -defaultValue
-			$_.properties.platformFaultDomain = $Null
-			$script:copyVMs[$vmName].PlatformFaultDomain = -1
-		}
-
-		# save vmss name
-		if ($Null -ne $_.properties.virtualMachineScaleSet.id) {
-			$vmssName = (get-resourceComponents $_.properties.virtualMachineScaleSet.id).mainResourceName
-			$script:copyVMs[$vmName].VmssName = $vmssName
+		else{
+			$_.properties.platformFaultDomain = $platformFaultDomain
 		}
 	}
+}
+
+#--------------------------------------------------------------
+function set-singlePlacementGroup {
+#--------------------------------------------------------------
+	$script:seriesMixed = $False
+
+	#--------------------------------------------------------------
+	# set singlePlacementGroup
+	$script:resourcesALL
+	| Where-Object type -eq 'Microsoft.Compute/virtualMachineScaleSets'
+	| ForEach-Object -Process {
+
+		$vmssName = $_.name
+		$singlePG = $Null
+
+		if ($_.properties.platformFaultDomainCount -gt 1) {
+			if ($script:vmssProperties[$vmssName].SeriesOther -eq $True) {
+				$singlePG = $False
+				if ($script:vmssProperties[$vmssName].SeriesM -eq $True) {
+					$script:seriesMixed = $True
+				}
+			}
+		}
+
+		if ('singlePlacementGroup' -in $boundParameterNames) {
+			test-values 'singlePlacementGroup' $singlePlacementGroup @($Null, $True, $False)
+			$singlePG = $singlePlacementGroup
+		}
+		elseif ($singlePG -eq $False) {
+			write-logFileWarning "setting 'singlePlacementGroup' of VMSS '$vmssName' to false because of used VM size" `
+								"You can override this by using RGCOPY parameter 'singlePlacementGroup'"
+		}
+
+		$_.properties.singlePlacementGroup = $singlePG
+		$script:vmssProperties[$vmssName].singlePlacementGroup     = $_.properties.singlePlacementGroup
+		$script:vmssProperties[$vmssName].platformFaultDomainCount = $_.properties.platformFaultDomainCount
+	}
+
+	if ($script:MseriesWithFaultDomain -eq $True) {
+		write-logFileWarning "M-series VMs do CURRENTLY not support setting fault domain" `
+							"Use parameter 'setVmFaultDomain' for setting fault domain to 'none'"
+	}
+
+	if ($script:seriesMixed) {
+		write-logFileWarning "VMSS Flex (with FD Count >1) does CURRENTLY not support mixing M-Series VMs with other VMs" 
+	}
+
+	#--------------------------------------------------------------
+	# save singlePlacementGroup in copyVMs for later output
+	$script:copyVMs.Values
+	| Where-Object {$Null -ne $_.VmssName}
+	| ForEach-Object {
+
+		$_.singlePlacementGroup     = $script:vmssProperties[$_.VmssName].singlePlacementGroup
+		$_.platformFaultDomainCount = $script:vmssProperties[$_.VmssName].platformFaultDomainCount
+	}
+
+	#--------------------------------------------------------------
+	# output of VMSS
+	$script:copyVMs.Values
+	| Where-Object {$Null -ne $_.VmssName}
+	| Sort-Object VmssName, Name
+	| Select-Object `
+		@{label="VMSS name";    expression={get-shortOutput (write-secureString $_.VmssName) 16}}, `
+		@{label="VM name";      expression={get-shortOutput (write-secureString $_.Name) 42}}, `
+		@{label="Size";         expression={$_.VmSize}}, `
+		@{label="Zone";         expression={get-replacedOutput $_.VmZone 0}}, `
+		@{label="Fault Domain"; expression={get-replacedOutput $_.PlatformFaultDomain -1}}, `
+		@{label="FD Count";     expression={$_.platformFaultDomainCount}}, `
+		@{label="singlePlacementGroup"; expression={get-replacedOutput $_.singlePlacementGroup $Null}}
+	| Format-Table
+	| write-LogFilePipe
 }
 
 #--------------------------------------------------------------
@@ -6371,7 +6439,7 @@ function new-proximityPlacementGroup {
 		'Microsoft.Compute/availabilitySets' `
 		'Microsoft.Compute/virtualMachineScaleSets' -ignoreMissingResources
 	$script:ppgOfAvset = @{}
-	$created = @()
+	$createdPPG = @()
 
 	#--------------------------------------------------------------
 	# remove all ProximityPlacementGroups
@@ -6434,8 +6502,8 @@ function new-proximityPlacementGroup {
 
 		# PPG has not been already created
 		# (the same name might occur 2 times in the RGCOPY array-parameter)
-		if (($ppgName -notin $created) -and ($setVmMerge.count -eq 0)) {
-			$created += $ppgName
+		if (($ppgName -notin $createdPPG) -and ($setVmMerge.count -eq 0)) {
+			$createdPPG += $ppgName
 			write-logFileUpdates 'proximityPlacementGroups' $ppgName 'create'
 			[array] $script:resourcesALL += $res
 		}
@@ -6447,8 +6515,8 @@ function new-availabilitySet {
 #--------------------------------------------------------------
 	# fill [hashtable] $script:paramValues
 	set-parameter 'createAvailabilitySet' $createAvailabilitySet 'Microsoft.Compute/virtualMachines'
-	$deleted = @()
-	$created = @()
+	$deletedAvSet = @()
+	$createdAvSet = @()
 
 	#--------------------------------------------------------------
 	# remove avsets
@@ -6458,12 +6526,12 @@ function new-availabilitySet {
 
 		if ($skipAvailabilitySet -or ($_.name -like 'rgcopy.tipGroup*')) {
 			write-logFileUpdates 'availabilitySets' $_.name 'delete'
-			$deleted += $_.name
+			$deletedAvSet += $_.name
 		}
 	}
 
 	# delete resource
-	foreach ($asName in $deleted) {
+	foreach ($asName in $deletedAvSet) {
 		remove-resources 'Microsoft.Compute/availabilitySets' $asName
 	}
 
@@ -6475,7 +6543,7 @@ function new-availabilitySet {
 		$id = $_.properties.availabilitySet.id
 		if ($Null -ne $id) {
 			$asName = (get-resourceComponents $id).mainResourceName
-			if ($asName -in $deleted) {
+			if ($asName -in $deletedAvSet) {
 
 				write-logFileUpdates 'virtualMachines' $_.name 'remove availabilitySet'
 				$_.properties.availabilitySet = $Null
@@ -6528,8 +6596,8 @@ function new-availabilitySet {
 
 		# AvSet has not been already created
 		# (the same name might occur 2 times in the RGCOPY array-parameter)
-		if (($asName -notin $created) -and ($setVmMerge.count -eq 0)) {
-			$created += $asName
+		if (($asName -notin $createdAvSet) -and ($setVmMerge.count -eq 0)) {
+			$createdAvSet += $asName
 			write-logFileUpdates 'availabilitySets' $asName 'create'
 			[array] $script:resourcesALL += $res
 		}
@@ -6542,11 +6610,10 @@ function new-availabilitySet {
 	| ForEach-Object {
 
 		# check fault domain count
-		$max = $script:MaxRegionFaultDomains
-		if ($_.properties.platformFaultDomainCount -gt $max ) {
-			write-logFileWarning "The maximum fault domain count in region '$targetLocation' is $max" -stopWhenForceVmChecks
-			write-logFileUpdates 'availabilitySets' $_.name 'set faultDomainCount' $max
-			$_.properties.platformFaultDomainCount = $max
+		if ($_.properties.platformFaultDomainCount -gt $script:MaxRegionFaultDomains ) {
+			write-logFileWarning "The maximum fault domain count in region '$targetLocation' is $script:MaxRegionFaultDomains" -stopWhenForceVmChecks
+			write-logFileUpdates 'availabilitySets' $_.name 'set faultDomainCount' $script:MaxRegionFaultDomains
+			$_.properties.platformFaultDomainCount = $script:MaxRegionFaultDomains
 		}
 	}
 
@@ -6704,100 +6771,6 @@ function update-proximityPlacementGroup {
 									" firstly,  create VMs: $($ppg.vmsZone)" `
 									" secondly, create VMs: $($ppg.vmsOther)" `
 									-stopCondition $('setVmDeploymentOrder' -notin $boundParameterNames)
-		}
-	}
-}
-
-#--------------------------------------------------------------
-function update-vmFaultDomain {
-#--------------------------------------------------------------
-	# process RGCOPY parameter
-	set-parameter 'setVmFaultDomain' $setVmFaultDomain
-	get-ParameterRule
-	while ($Null -ne $script:paramConfig) {
-
-		$faultDomain = $script:paramConfig
-		test-values 'setVmFaultDomain' $faultDomain @('none', '0', '1', '2') 'faultDomain'
-		# convert to internal syntax
-		if ($faultDomain -eq 'none') {
-			$faultDomain = -1
-		}
-		$faultDomain = $faultDomain -as [int]
-
-		$script:copyVMs.values
-		| Where-Object Name -in $script:paramVMs
-		| ForEach-Object {
-
-			$_.PlatformFaultDomainNew = $faultDomain
-		}
-		get-ParameterRule
-	}
-
-	# output of changes
-	$script:copyVMs.Values
-	| Where-Object Skip -ne $True
-	| Sort-Object Name
-	| ForEach-Object {
-
-		$vmName 	= $_.Name
-		$vmssName	= $_.VmssName
-
-		$current	= $_.PlatformFaultDomain
-		$wanted		= $_.PlatformFaultDomainNew
-		if ($Null -eq $wanted) {
-			$wanted = $current
-		}
-
-		# check for vmss
-		if (($Null -eq $vmssName) -and ($wanted -ne -1)) {
-			write-logFileWarning "VM '$vmName' is not part of a VM Scale Set"
-			$wanted = -1
-		}
-
-		if ($Null -ne $vmssName) {
-			# check for maximum value
-			$max = $script:vmssProperties[$vmssName].faultDomainCount
-
-			if ($wanted -ge $max) {
-				write-logFileWarning "VM Scale Set '$vmssName' only supports $max fault domains"
-				$wanted = -1
-			}
-			elseif (($max -eq 1) -and ($wanted -ne -1)) {
-				write-logFileWarning "VM Scale Set '$vmssName' does not support fault domains"
-				$wanted = -1
-			}
-		}
-
-		# update
-		if ($current -ne $wanted) {
-			$_.PlatformFaultDomain = $wanted
-			$action = 'set'
-		}
-		else {
-			$action = 'keep'
-		}
-		# output
-		if ($_.PlatformFaultDomain -eq -1) {
-			write-logFileUpdates 'virtualMachines' $vmName "$action fault domain" 'none' -defaultValue
-		}
-		else {
-			write-logFileUpdates 'virtualMachines' $vmName "$action fault domain" $_.PlatformFaultDomain
-		}
-	}
-
-	# update virtualMachines
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Compute/virtualMachines'
-	| ForEach-Object {
-
-		$vmName = $_.name
-		$platformFaultDomain = $script:copyVMs[$vmName].PlatformFaultDomain
-
-		if ($platformFaultDomain -eq -1) {
-			$_.properties.platformFaultDomain = $Null
-		}
-		else{
-			$_.properties.platformFaultDomain = $platformFaultDomain
 		}
 	}
 }
@@ -8291,8 +8264,6 @@ function new-greenlist {
 	add-greenlist 'Microsoft.Network/networkSecurityGroups' '*'
 	add-greenlist 'Microsoft.Network/networkSecurityGroups/securityRules' '*'
 	add-greenlist 'Microsoft.Network/bastionHosts' '*'
-	add-greenlist 'Microsoft.HanaOnAzure/sapMonitors' '*'
-	add-greenlist 'Microsoft.HanaOnAzure/sapMonitors/providerInstances' '*'
 
 	# will be always removed by RGCOPY:
 	# only added to green list to prevent warning
@@ -9321,30 +9292,6 @@ function update-remoteSourceRG {
 	update-remoteSourceIP 'Microsoft.Network/networkInterfaces' 'ipConfigurations'
 	update-remoteSourceIP 'Microsoft.Network/loadBalancers' 'frontendIPConfigurations'
 	update-remoteSourceIP 'Microsoft.Network/bastionHosts' 'ipConfigurations'
-
-	# sapMonitors
-	$script:resourcesAMS
-	| Where-Object type -eq 'Microsoft.HanaOnAzure/sapMonitors'
-	| ForEach-Object -Process {
-
-		if ($_.properties.monitorSubnet -like '/*') {
-
-			# convert resource ID to to resource function
-			$r = get-resourceComponents $_.properties.monitorSubnet
-
-			# convert name
-			$resKey = "virtualNetworks/$($r.resourceGroup)/$($r.mainResourceName)"
-			$vnetName = $script:remoteNames[$resKey].newName
-			$resFunction = get-resourceFunction `
-							'Microsoft.Network' `
-							'virtualNetworks'	$vnetName `
-							'subnets'			$r.subResourceName
-
-			# set ID and dependency
-			$_.properties.monitorSubnet = $resFunction
-			[array] $_.dependsOn += $resFunction
-		}
-	}
 }
 
 #--------------------------------------------------------------
@@ -9525,13 +9472,11 @@ function new-templateTarget {
 	# count parameter changes caused by default values:
 	$script:countDiskSku				= 0
 	$script:countVmZone					= 0
-	$script:countLoadBalancerSku		= 0
 	$script:countPrivateIpAlloc			= 0
 	$script:countAcceleratedNetworking	= 0
 	# do not count modifications if parameter was supplied explicitly
 	if ('setDiskSku'				-in $boundParameterNames) { $script:countDiskSku				= -999999}
 	if ('setVmZone'					-in $boundParameterNames) { $script:countVmZone					= -999999}
-	if ('setLoadBalancerSku'		-in $boundParameterNames) { $script:countLoadBalancerSku		= -999999}
 	if ('setPrivateIpAlloc'			-in $boundParameterNames) { $script:countPrivateIpAlloc			= -999999}
 	if ('setAcceleratedNetworking'	-in $boundParameterNames) { $script:countAcceleratedNetworking	= -999999}
 
@@ -9564,15 +9509,6 @@ function new-templateTarget {
 	update-paramSetDiskCaching
 	update-paramSetAcceleratedNetworking
 
-	# change LOCATION
-	$script:resourcesALL
-	| Where-Object type -ne 'Microsoft.HanaOnAzure/sapMonitors'
-	| ForEach-Object -Process {
-		if ($_.location.length -ne 0) {
-			$_.location = $targetLocation
-		}
-	}
-
 	# remove identity
 	$script:resourcesALL
 	| ForEach-Object -Process {
@@ -9594,6 +9530,24 @@ function new-templateTarget {
 		-and ($_.type -notlike 'Microsoft.Compute/virtualMachineScaleSets*' )) {
 			write-logFileUpdates $type $_.name 'delete Zones'
 			$_.zones = $Null
+		}
+	}
+
+	# set publicIPAddresses Standard/Static: needed in newer APIs for VMs in Availability Zone
+	$script:resourcesALL
+	| Where-Object type -eq 'Microsoft.Network/publicIPAddresses'
+	| ForEach-Object -Process {
+
+		if ($_.sku.name -ne 'Standard') {
+			$_.sku = @{ name = 'Standard' }
+			write-logFileUpdates 'publicIPAddresses' $_.name 'set SKU' 'Standard'
+		}
+		if ($_.properties.publicIPAllocationMethod -ne 'Static') {
+			$_.properties.publicIPAllocationMethod = 'Static'
+			write-logFileUpdates 'publicIPAddresses' $_.name 'set AllocationMethod' 'Static'
+		}
+		if ($Null -ne $_.properties.ipAddress) {
+			$_.properties.ipAddress = $Null
 		}
 	}
 
@@ -9626,19 +9580,11 @@ function new-templateTarget {
 	$script:snapshotNames = convertTo-array (($script:resourcesALL | Where-Object `
 		type -eq 'Microsoft.Compute/snapshots').name)
 
-	# save AMS
-	$script:supportedProviders = @('SapHana', 'MsSqlServer', 'PrometheusOS', 'PrometheusHaCluster') # 'SapNetweaver' not supported yet
-	$script:resourcesAMS = convertTo-array (($script:resourcesALL | Where-Object { `
-			 ($_.type -eq 'Microsoft.HanaOnAzure/sapMonitors') `
-		-or (($_.type -eq 'Microsoft.HanaOnAzure/sapMonitors/providerInstances') -and ($_.properties.type -in $script:supportedProviders)) `
-	}))
-
 	update-skipVMs
 	remove-resources 'Microsoft.Storage/storageAccounts*'
 	remove-resources 'Microsoft.Compute/snapshots'
 	remove-resources 'Microsoft.Compute/disks'
 	remove-resources 'Microsoft.Compute/images*'
-	remove-resources 'Microsoft.HanaOnAzure/sapMonitors*'
 	remove-resources 'Microsoft.Compute/virtualMachines/extensions'
 	remove-resources 'Microsoft.Network/loadBalancers/backendAddressPools'
 	remove-resources 'Microsoft.Compute/virtualMachines' $script:skipVMs
@@ -9656,13 +9602,11 @@ function new-templateTarget {
 		$script:resourcesALL = convertTo-array ($script:resourcesALL | Where-Object { `
 				 ($_.type -eq 'Microsoft.Compute/virtualMachines') `
 			-and ($_.name -in $script:mergeVMs) })
-
-		$script:resourcesAMS = @()
 	}
 
 	update-netApp
 
-	if ($script:MaxRegionFaultDomains -eq 1) {
+	if ($script:MaxRegionFaultDomains -lt 2) {
 		write-logFileWarning "Region '$targetLocation' does not support VM Scale Sets Flexible"
 		$script:skipVmssFlex	= $True
 		$script:createVmssFlex	= @()
@@ -9680,12 +9624,18 @@ function new-templateTarget {
 
 	# create PPG before AvSet and vmssFlex
 	new-proximityPlacementGroup
-	new-vmssFlex
+
+	$script:vmssProperties = @{}
+	get-vmssFlex    # get or remove existing VMSS
+	new-vmssFlex    # after removing ALL existing VMSS
+	update-faultDomainCount
+	update-vmZone
+	update-vmFaultDomain
+	set-singlePlacementGroup
+
 	new-availabilitySet
 	update-proximityPlacementGroup
-	update-vmZone
 	update-diskZone
-	update-vmFaultDomain
 	update-vmTipGroup
 
 	update-vmSize
@@ -9697,9 +9647,6 @@ function new-templateTarget {
 	update-NICs
 	update-subnets
 	update-networkPeerings
-
-	# when creating targetAms template, the target template will be changed, too (region of vnet)
-	new-templateTargetAms
 
 	update-SKUs
 	update-IpAllocationMethod
@@ -9751,7 +9698,6 @@ function new-templateTarget {
 	if ($copyMode) {
 		if ($script:countDiskSku				-gt 0) { write-changedByDefault "setDiskSku = $setDiskSku" }
 		if ($script:countVmZone					-gt 0) { write-changedByDefault "setVmZone = $setVmZone" }
-		if ($script:countLoadBalancerSku		-gt 0) { write-changedByDefault "setLoadBalancerSku = $setLoadBalancerSku" }
 		if ($script:countPrivateIpAlloc			-gt 0) { write-changedByDefault "setPrivateIpAlloc = $setPrivateIpAlloc" }
 		if ($script:countAcceleratedNetworking	-gt 0) { write-changedByDefault "setAcceleratedNetworking = $setAcceleratedNetworking" }
 		write-logFile
@@ -9902,71 +9848,6 @@ function update-skipVMs {
 }
 
 #--------------------------------------------------------------
-function get-amsProviderProperty {
-#--------------------------------------------------------------
-	param (
-		[string] $string
-	)
-
-	$property = @{}
-	if ($string.length -eq 0) {
-		return $property
-	}
-
-	$all = $string -split '"'
-	$i = 1
-	while ($i -lt $all.Count) {
-		# get key
-		$key = $all[$i]
-		$i++
-		if ($i -ge $all.Count) { break }
-
-		# value is string
-		if (($all[$i] -replace '\s', '') -eq ':') {
-			$i++
-			if ($i -ge $all.Count) { break }
-			$value = $all[$i]
-			$property.$key = $value
-			$i += 2
-		}
-		# value is numeric
-		else {
-			$value = $all[$i] -replace '\D', ''
-			$property.$key = $value -as [int32]
-			$i++
-		}
-	}
-
-	return $property
-}
-
-#--------------------------------------------------------------
-function set-amsProviderProperty {
-#--------------------------------------------------------------
-	param (
-		[hashtable] $hash
-	)
-
-	[string] $string = ''
-	$sep = ''
-
-	$hash.GetEnumerator()
-	| ForEach-Object {
-
-		$string += $sep
-		$sep = ','
-		$string += "`"$($_.Key)`":"
-		if ($_.Value -is [string]) {
-			$string += "`"$($_.Value)`""
-		}
-		else {
-			$string += "$($_.Value)"
-		}
-	}
-	return "{$string}"
-}
-
-#--------------------------------------------------------------
 function update-vnetLocation {
 #--------------------------------------------------------------
 	param (
@@ -10028,335 +9909,6 @@ function update-vnetLocation {
 }
 
 #--------------------------------------------------------------
-function new-templateTargetAms {
-#--------------------------------------------------------------
-	if (!$createArmTemplateAms) {
-		$script:resourcesAMS = @()
-		return
-	}
-	$locationsAMS = @('East US 2', 'West US 2', 'East US', 'West Europe')
-
-	# Rename needed because of the following deployment error:
-	#   keyvault.VaultsClient#CreateOrUpdate: Failure sending request
-	#   "Exist soft deleted vault with the same name."
-
-	# process AMS instance
-	$i = 0
-	$script:resourcesAMS
-	| Where-Object type -eq 'Microsoft.HanaOnAzure/sapMonitors'
-	| ForEach-Object {
-
-		if ($i++ -gt 0) {
-			write-logFileError 'Only one AMS Instance per resource group supported by RGCOPY'
-		}
-
-		# rename AMS instance
-		write-logFileUpdates 'sapMonitors' $_.name 'rename to' '' '<amsInstanceName>' ' (in AMS template)'
-		$_.name = "[parameters('amsInstanceName')]"
-
-		# remove dependencies
-		$_.dependsOn = @()
-
-		# use existing WS defined by parameters
-		if ( ($amsWsName.length -ne 0) `
-		-and ($amsWsRG.length -ne 0) ) ` {
-
-			$wsId = "/subscriptions/$targetSubID/resourceGroups/$amsWsRG/providers/Microsoft.OperationalInsights/workspaces/$amsWsName"
-			$_.properties.logAnalyticsWorkspaceArmId = $wsId
-		}
-		# create new WS in Managed Resource Group
-		elseif (!$amsWsKeep) {
-			$_.properties.logAnalyticsWorkspaceArmId = $Null
-		}
-		# keep existing WS
-		else {
-			if ($sourceSub -ne $targetSub) {
-				write-logFileWarning "Cannot keep AMS Analytical Workspace when copying to different subscription"
-				$_.properties.logAnalyticsWorkspaceArmId = $Null
-			}
-		}
-
-		# https://docs.microsoft.com/en-us/azure/virtual-machines/workloads/sap/azure-monitor-overview
-		if ($amsShareAnalytics) {
-			$_.properties.enableCustomerAnalytics = $True
-			write-logFileWarning 'Sharing AMS Customer Analytics Data with Microsoft'
-		}
-		else {
-			$_.properties.enableCustomerAnalytics = $False
-		}
-
-		# set AMS location
-		$amsLocationOld = $_.location
-		$monitorVnet = (get-resourceComponents $_.properties.monitorSubnet).mainResourceName
-
-		# AMS vnet is peered
-		if ($monitorVnet -in $script:peeredVnets) {
-			# change VNET location
-			write-logFileUpdates 'sapMonitors' '<amsInstanceName>' 'set location' $amsLocationOld
-			update-vnetLocation $monitorVnet $amsLocationOld
-		}
-
-		# AMS vnet is not peered
-		else {
-			# change AMS location
-			write-logFileUpdates 'sapMonitors' '<amsInstanceName>' 'set location' $targetLocation
-			$_.location = $targetLocation
-		}
-
-		$script:amsLocationNew = $_.location
-	}
-
-	# no AMS instance found
-	if ($i -eq 0) {
-		$script:resourcesAMS = @()
-		return
-	}
-
-	# Module installed?
-	if ($amsUsePowerShell) {
-		$azHoaVersion = (Get-InstalledModule Az.HanaOnAzure -MinimumVersion 0.3 -ErrorAction 'SilentlyContinue')
-		if ($azHoaVersion.count -eq 0) {
-			write-logFileError 'Minimum required version of module Az.HanaOnAzure is 0.3' `
-								'Run "Install-Module -Name Az.HanaOnAzure -AllowClobber" to install or update'
-		}
-	}
-
-	# AMS not supported in region
-	$amsLocationDisplayName = (Get-AzLocation | Where-Object Location -eq $script:amsLocationNew).DisplayName
-	if ($amsLocationDisplayName -notin $locationsAMS) {
-		write-logFileWarning "AMS not supported in region $script:amsLocationNew ($amsLocationDisplayName)"
-		write-logFileWarning "Update source RG $sourceRG`: Use Network Peering and locate AMS in a peered, supported region"
-		$script:resourcesAMS = @()
-		return
-	}
-
-	# rename AMS providers
-	$script:resourcesAMS
-	| Where-Object type -eq 'Microsoft.HanaOnAzure/sapMonitors/providerInstances'
-	| ForEach-Object  {
-
-		$x, $providerName = $_.name -split '/'
-		$_.name = "[concat(parameters('amsInstanceName'),'/$providerName')]"
-
-		[array] $_.dependsOn = get-resourceFunction `
-								'Microsoft.HanaOnAzure' `
-								'sapMonitors'	"parameters('amsInstanceName')"
-	}
-
-	# set HANA/SQL password
-	$script:resourcesAMS
-	| Where-Object type -eq 'Microsoft.HanaOnAzure/sapMonitors/providerInstances'
-	| Where-Object {$_.properties.type -in ('SapHana','MsSqlServer')}
-	| ForEach-Object  {
-
-		if ($amsUsePowerShell) {
-			$dbPass = ''
-		}
-		elseif ($dbPassword.Length -eq 0) {
-			write-logFileWarning "RGCOPY parameter 'dbPassword' missing for AMS provider type $($_.properties.type)"
-			$dbPass = ''
-		}
-		else {
-			write-logFileWarning "RGCOPY parameter 'dbPassword' stored as plain text in ARM template"
-			$dbPass = ConvertFrom-SecureString -SecureString $dbPassword -AsPlainText
-		}
-
-		if ($dbPass -like '*"*') {
-			write-logFileWarning "RGCOPY parameter 'dbPassword' must not contain double quotes (`")"
-			$dbPass = ''
-		}
-
-		$instanceProperty = get-amsProviderProperty $_.properties.properties
-		if ($_.properties.type -eq 'SapHana')		{$instanceProperty.hanaDbPassword = $dbPass}
-		if ($_.properties.type -eq 'MsSqlServer')	{$instanceProperty.sqlPassword = $dbPass}
-		$_.properties.properties = set-amsProviderProperty $instanceProperty
-
-		$metadata = get-amsProviderProperty $_.properties.metadata
-		if ($metadata.count -ne 0)					{$_.properties.metadata = set-amsProviderProperty $metadata}
-	}
-
-	# set parameters
-	$templateParameters = @{
-		amsInstanceName = @{
-			defaultValue	= "[concat('ams-',toLower(take(concat(replace(replace(replace(replace(replace(resourceGroup().name,'_',''),'-',''),'.',''),'(',''),')',''),'4rgcopy'),24)))]"
-			type			= 'String'
-		}
-	}
-	write-logFileUpdates 'template parameter' '<amsInstanceName>' 'create' '' '' '(in AMS template)'
-
-	# create template
-	$script:amsTemplate = @{
-		contentVersion	= '1.0.0.0'
-		parameters		= $templateParameters
-		resources		= $script:resourcesAMS
-	}
-	$script:amsTemplate.Add('$schema', "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#")
-}
-
-#--------------------------------------------------------------
-function new-amsProviders {
-#--------------------------------------------------------------
-	# get providers from AMS template
-	$script:resourcesAMS
-	| Where-Object type -eq 'Microsoft.HanaOnAzure/sapMonitors/providerInstances'
-	| ForEach-Object  {
-
-		$providerType = $_.properties.type
-		$providerName = $_.name
-
-		if ($providerType -in $script:supportedProviders) {
-
-			# provider name using ARM template variable
-			if ($providerName[0] -eq '[') {
-
-				[array] $a = $providerName -split '\)'
-				if ($a.count -gt 1) {
-					[array] $b = $a[1] -split "'"
-					if ($b.count -gt 1) {
-						[array] $c = $b[1] -split '/'
-						if ($c.count -gt 1) {
-							$providerName = $c[1]
-						}
-						else {
-							write-logFileError "Invalid ARM template for AMS provider" `
-												"Invalid provider name '$providerName'" 
-						}
-					}
-				}
-			}
-			# provider name as plain text: <instanceName>/<providerName>
-			else {
-				[array] $a = $providerName -split '/'
-				if ($a.count -gt 1) {
-					$providerName = $a[1]
-				}
-				else {
-					write-logFileError "Invalid ARM template for AMS provider" `
-										"Invalid provider name '$providerName'"
-				}
-			}
-
-			$parameter = @{
-				ResourceGroupName	= $targetRG
-				SapMonitorName 		= $amsInstanceName
-				Name				= $providerName
-				ProviderType		= $providerType
-			}
-
-			# get instance properties
-			$instanceProperty = get-amsProviderProperty $_.properties.properties
-			if ($providerType -in ('SapHana','MsSqlServer')) {
-				if ($dbPassword.Length -eq 0) {
-					write-logFileWarning "Resource Group contains AMS provider type $providerType, but RGCOPY parameter 'dbPassword' is misssing"
-					$dbPass = ''
-				}
-				else {
-					$dbPass = ConvertFrom-SecureString -SecureString $dbPassword -AsPlainText
-				}
-				if ($providerType -eq 'SapHana') {
-					$instanceProperty.hanaDbPassword = $dbPass
-				}
-				if ($providerType -eq 'MsSqlServer') {
-					$instanceProperty.sqlPassword = $dbPass
-				}
-			}
-			$parameter.Add('InstanceProperty', $instanceProperty)
-
-			# get instance meta data
-			$metadata = get-amsProviderProperty $_.properties.metadata
-			if ($metadata.count -ne 0) {
-				$parameter.Add('Metadata', $metadata)
-			}
-
-			Write-Output  "Creating AMS Provider '$providerName' ..."
-			write-logFileHashTable $parameter
-
-			# create AMS Provider
-			$res = New-AzSapMonitorProviderInstance @parameter
-			if ($res.ProvisioningState -ne 'Succeeded') {
-				write-logFileError "Creation of AMS Provider '$providerName' failed" `
-									"Check the Azure Activity Log in resource group $targetRG"
-			}
-		}
-	}
-}
-
-#--------------------------------------------------------------
-function new-amsInstance {
-#--------------------------------------------------------------
-	$parameter = @{
-		ResourceGroupName		= $targetRG
-		Name 					= $amsInstanceName
-		ErrorAction				= 'SilentlyContinue'
-		ErrorVariable			= '+myDeploymentError'
-	}
-
-	# get parameters from AMS template (single AMS instance)
-	$script:resourcesAMS
-	| Where-Object type -eq 'Microsoft.HanaOnAzure/sapMonitors'
-	| ForEach-Object {
-
-		if ($_.properties.enableCustomerAnalytics -eq $True) {
-			$parameter.EnableCustomerAnalytic = $True
-		}
-
-		$parameter.Location = $_.location
-
-		$r = get-resourceComponents $_.properties.monitorSubnet
-		$parameter.MonitorSubnet = get-resourceString `
-										$targetSubID		$targetRG `
-										'Microsoft.Network' `
-										'virtualNetworks'	$r.mainResourceName `
-										'subnets'			$r.subResourceName
-
-		$wsID = $_.properties.logAnalyticsWorkspaceArmId
-		if ($Null -ne $wsID) {
-
-			$r = get-resourceComponents $wsID
-			$wsName = $r.mainResourceName
-			$wsRG	= $r.resourceGroup
-
-			$ws = Get-AzOperationalInsightsWorkspace `
-					-ResourceGroupName $wsRG `
-					-Name $wsName
-
-			$wsKey = Get-AzOperationalInsightsWorkspaceSharedKey `
-						-ResourceGroupName $wsRG `
-						-Name $wsName
-
-			$parameter.Add('LogAnalyticsWorkspaceSharedKey',	$wsKey.PrimarySharedKey)
-			$parameter.Add('LogAnalyticsWorkspaceId', 			$ws.CustomerId)
-			$parameter.Add('LogAnalyticsWorkspaceResourceId',	$ws.ResourceId)
-		}
-	}
-
-	write-logFile  "Creating AMS Instance '$amsInstanceName' ..."
-	write-logFileHashTable $parameter
-
-	# create AMS Instance
-	$res = New-AzSapMonitor @parameter
-	if ($res.ProvisioningState -ne 'Succeeded') {
-
-		$NewName = get-NewName $amsInstanceName 30
-		write-logFile $myDeploymentError -ForegroundColor 'Yellow'
-		write-logFile
-		write-logFile "Repeat failed deployment using AMS instance name '$NewName'..."
-		write-logFile
-
-		# repeat deployment
-		$parameter.Name			= $NewName
-		$script:amsInstanceName = $NewName
-		$res = New-AzSapMonitor @parameter
-		if ($res.ProvisioningState -ne 'Succeeded') {
-			write-logFile $myDeploymentError -ForegroundColor 'Yellow'
-			write-logFile
-			write-logFileError "Creation of AMS Instance '$amsInstanceName' failed" `
-								"Check the Azure Activity Log in resource group $targetRG"
-		}
-	}
-}
-
-#--------------------------------------------------------------
 function get-NewName {
 #--------------------------------------------------------------
 	param (
@@ -10381,35 +9933,6 @@ function get-NewName {
 	else {
 		return "$partName`3"
 	}
-}
-
-#--------------------------------------------------------------
-function remove-amsInstance {
-#--------------------------------------------------------------
-	param (
-		$resourceGroup
-	)
-
-	$ams = Get-AzSapMonitor -ErrorAction 'SilentlyContinue'
-	test-cmdlet 'Get-AzSapMonitor'  "Could not get AMS instances"
-	
-	$ams | ForEach-Object {
-		$amsName = $_.Name
-		$ids = $_.Id -split '/'
-		if ($ids.count -gt 4) {
-			$amsRG = $ids[4]
-			if ($amsRG -eq $resourceGroup) {
-				write-logFile "Removing AMS instance '$amsName'..."
-
-				Remove-AzSapMonitor `
-					-Name 				$amsName `
-					-ResourceGroupName	$amsRG `
-					-ErrorAction		'SilentlyContinue'
-				test-cmdlet 'Remove-AzSapMonitor'  "Could not delete AMS instance '$amsName'" 
-			}
-		}
-	}
-	write-logFile
 }
 
 #--------------------------------------------------------------
@@ -10522,53 +10045,6 @@ function deploy-templateTarget {
 	}
 
 	write-stepEnd
-}
-
-#--------------------------------------------------------------
-function deploy-templateTargetAms {
-#--------------------------------------------------------------
-	param (
-		$DeploymentPath,
-		$DeploymentName
-	)
-
-	# deploy using ARM template
-	write-logFile "Deploying ARM template '$DeploymentPath'..."
-
-	$parameter = @{
-		ResourceGroupName	= $targetRG
-		Name				= $DeploymentName
-		TemplateFile		= $DeploymentPath
-		ErrorAction			= 'SilentlyContinue'
-		ErrorVariable		= '+myDeploymentError'
-	}
-	# add template parameter
-	$parameter.TemplateParameterObject = @{ amsInstanceName = $amsInstanceName }
-
-	# display ARM deployment parameters
-	write-logFileHashTable $parameter
-
-	# deploy
-	New-AzResourceGroupDeployment @parameter
-	| write-LogFilePipe
-	if (!$?) {
-		$NewName = get-NewName $amsInstanceName 30
-		write-logFile $myDeploymentError -ForegroundColor 'Yellow'
-		write-logFile
-		write-logFile "Repeating failed deployment using AMS instance name '$NewName'..."
-		write-logFile
-
-		# repeat deployment
-		$parameter.TemplateParameterObject 	=  @{ amsInstanceName = $NewName }
-		$parameter.name 					= "$DeploymentName`2"
-		New-AzResourceGroupDeployment @parameter
-		| write-LogFilePipe
-		if (!$?) {
-			write-logFile $myDeploymentError -ForegroundColor 'yellow'
-			write-logFileError "AMS deployment '$DeploymentName' failed" `
-								"Check the Azure Activity Log in resource group $targetRG"
-		}
-	}
 }
 
 #--------------------------------------------------------------
@@ -11758,36 +11234,6 @@ function get-subscriptionFeatures {
 	}
 }
 
-#--------------------------------------------------------------
-function test-justRedeployAms {
-#--------------------------------------------------------------
-	if (!$justRedeployAms) { return }
-
-	# required steps:
-	$script:skipSnapshots		= $True
-	$script:skipBlobs			= $True
-	$script:skipDeploymentVMs	= $True
-	$script:skipExtensions		= $True
-	$script:createArmTemplateAms = $True
-	$script:skipArmTemplate 	= $False
-
-	# forbidden parameters:
-	write-logFileForbidden 'justRedeployAms' @(
-		'amsWsKeep', 'amsWsName', 'amsWsRG',
-		'skipDeployment',
-		'updateMode', 'archiveMode',
-		'justCreateSnapshots', 'justDeleteSnapshots',
-		'skipArmTemplate',
-		'createVolumes', 'createDisks','stopRestore', 'continueRestore',
-		'startWorkload', 'deleteTargetSA', 'deleteSourceSA')
-
-
-	# DB password needed for HANA and SQL Server AMS provider
-	if ($dbPassword.Length -eq 0) {
-		write-logFileWarning "parameter 'dbPassword' missing. It might be needed for AMS"
-		write-logFile
-	}
-}
 
 #-------------------------------------------------------------
 function test-archiveMode {
@@ -11820,7 +11266,7 @@ function test-archiveMode {
 	# forbidden parameters:
 	write-logFileForbidden 'archiveMode' @(
 		'updateMode', 
-		'justCreateSnapshots', 'justDeleteSnapshots', 'justRedeployAms',
+		'justCreateSnapshots', 'justDeleteSnapshots',
 		'pathArmTemplate', 'skipArmTemplate',
 		'createVolumes', 'createDisks','stopRestore', 'continueRestore',
 		'startWorkload', 'deleteTargetSA', 'deleteSourceSA', 'stopVMsTargetRG',
@@ -11849,7 +11295,7 @@ function test-justCopyBlobs {
 	# forbidden parameters:
 	write-logFileForbidden 'justCopyBlobs' @(
 		'updateMode', 
-		'justCreateSnapshots', 'justDeleteSnapshots', 'justRedeployAms',
+		'justCreateSnapshots', 'justDeleteSnapshots',
 		'pathArmTemplate',
 		'createVolumes', 'createDisks','stopRestore', 'continueRestore',
 		'stopVMsTargetRG', 'stopVMsSourceRG', 'deleteSnapshots',
@@ -11872,7 +11318,7 @@ function test-justCopyDisks {
 	# forbidden parameters:
 	write-logFileForbidden 'justCopyDisks' @(
 		'updateMode', 
-		'justCreateSnapshots', 'justDeleteSnapshots', 'justRedeployAms',
+		'justCreateSnapshots', 'justDeleteSnapshots',
 		'pathArmTemplate',
 		'createVolumes', 'createDisks','stopRestore', 'continueRestore',
 		'stopVMsTargetRG', 'stopVMsSourceRG', 'deleteSnapshots',
@@ -11894,7 +11340,7 @@ function test-restartBlobs {
 	# forbidden parameters:
 	write-logFileForbidden 'restartBlobs' @(
 		'updateMode', 
-		'justCreateSnapshots', 'justDeleteSnapshots', 'justRedeployAms',
+		'justCreateSnapshots', 'justDeleteSnapshots',
 		'pathArmTemplate',
 		'skipBlobs')
 }
@@ -11915,7 +11361,7 @@ function test-stopRestore {
 		# forbidden parameters:
 		write-logFileForbidden 'continueRestore' @(
 			'updateMode', 'archiveMode',
-			'justCreateSnapshots', 'justDeleteSnapshots', 'justRedeployAms',
+			'justCreateSnapshots', 'justDeleteSnapshots',
 			'restartBlobs', 'justCopyBlobs', 'justStopCopyBlobs',
 			'stopRestore')
 	}
@@ -11930,7 +11376,7 @@ function test-stopRestore {
 		# forbidden parameters:
 		write-logFileForbidden 'stopRestore' @(
 			'updateMode', 'archiveMode',
-			'justCreateSnapshots', 'justDeleteSnapshots', 'justRedeployAms',
+			'justCreateSnapshots', 'justDeleteSnapshots',
 			'restartBlobs', 'justCopyBlobs', 'justStopCopyBlobs',
 			'continueRestore', 'startWorkload',
 			'deleteSourceSA')
@@ -11947,7 +11393,7 @@ function test-setVmMerge {
 
 	# forbidden parameters:
 	write-logFileForbidden 'setVmMerge' @(
-		'pathArmTemplate', 'pathArmTemplateAms', 'createArmTemplateAms', 'skipArmTemplate',
+		'pathArmTemplate', 'skipArmTemplate',
 		'startWorkload',
 		'skipVMs', 'skipDisks','stopVMsTargetRG')
 }
@@ -12788,7 +12234,7 @@ function step-armTemplate {
 	write-stepStart "Create ARM templates"
 	# create JSON template
 	new-templateSource
-	new-templateTarget # includes new-templateTargetAms
+	new-templateTarget
 	write-logFile
 
 	# write target ARM template to local file
@@ -12800,38 +12246,13 @@ function step-armTemplate {
 	}
 	write-logFile -ForegroundColor 'Cyan' "Target ARM template saved: $exportPath"
 	$script:armTemplateFilePaths += $exportPath
-
-	# special case: Redeployment of AMS with existing AMS template ($exportPathAms = $pathArmTemplateAms)
-	if ($justRedeployAms -and ($pathArmTemplateAms.length -ne 0)) {
-		write-logFile -ForegroundColor 'yellow' "Using given Azure Monitoring for SAP template: $exportPathAms"
-	}
-	# special case: Redeployment of AMS
-	elseif ($justRedeployAms -and ($script:resourcesAMS.count -eq 0)) {
-		write-logFileError "Invalid parameter 'justRedeployAms'" `
-							"Resource group '$sourceRG' does not contain an AMS instance" `
-							"You might use parameter 'pathArmTemplateAms' for supplying a given AMS template"
-	}
-
-	# write AMS template to local file
-	elseif ($script:resourcesAMS.count -ne 0) {
-		$text = $script:amsTemplate | ConvertTo-Json -Depth 20
-		Set-Content -Path $exportPathAms -Value $text -ErrorAction 'SilentlyContinue'
-		if (!$?) {
-			write-logFileError "Could not save Azure Monitoring for SAP template" `
-								"Failed writing file '$exportPathAms'"
-		}
-		write-logFile -ForegroundColor 'Cyan' "Azure Monitoring for SAP template saved: $exportPathAms"
-		$script:armTemplateFilePaths += $exportPathAms
-	}
 	write-stepEnd
 
 	#--------------------------------------------------------------
-	if (!$justRedeployAms) {
-		write-stepStart "Configured VMs/disks for Target Resource Group $targetRG"
-		show-targetVMs
-		compare-quota
-		write-stepEnd
-	}
+	write-stepStart "Configured VMs/disks for Target Resource Group $targetRG"
+	show-targetVMs
+	compare-quota
+	write-stepEnd
 }
 
 #--------------------------------------------------------------
@@ -13022,72 +12443,6 @@ function step-deployment {
 	}
 
 	#--------------------------------------------------------------
-	# Deploy Azure Monitor for SAP
-	if ($exportPathAms -in $script:armTemplateFilePaths) {
-
-		#--------------------------------------------------------------
-		# just re-deploy AMS (in source RG)
-		if ($justRedeployAms) {
-
-			# start VMs in the source RG
-			if (!$skipStartSAP) {
-				start-VMs $sourceRG
-			}
-			# start SAP in the source RG
-			$done = start-sap $sourceRG
-			if (!$done) {
-				write-logFileError "Azure Monitor for SAP (AMS) could not be re-deployed because SAP is not running"
-			}
-
-			write-stepStart "Re-deploy AMS instance"
-			# delete all AMS instances of source RG
-			remove-amsInstance $sourceRG
-
-			# rename AMS instance if parameter amsInstanceName was not supplied
-			# avoid error: A vault with the same name already exists in deleted state.
-			if ('amsInstanceName' -notin $boundParameterNames) {
-				$script:amsInstanceName = get-NewName $script:amsInstanceName 30
-			}
-		}
-
-		#--------------------------------------------------------------
-		# normal AMS deployment (in target RG)
-		else {
-
-			# VMs already started in the target RG
-			# start SAP in the target RG
-			$done = start-sap $targetRG
-			if (!$done) {
-				write-logFileError "Azure Monitor for SAP (AMS) could not be deployed because SAP is not running"
-			}
-			write-stepStart "Deploy AMS instance"
-		}
-
-		#--------------------------------------------------------------
-		# deploy using ARM template
-		if (!$amsUsePowerShell) {
-			deploy-templateTargetAms $exportPathAms "$sourceRG`-AMS.$timestampSuffix"
-		}
-		# deploy using cmdlets
-		else {
-			
-			$text = Get-Content -Path $exportPathAms -ErrorAction 'SilentlyContinue'
-			if (!$?) {
-				write-logFileError "Could not read file '$DeploymentPath'"
-			}
-			$json = $text | ConvertFrom-Json -AsHashtable -Depth 20
-			$script:resourcesAMS = $json.resources
-			new-amsInstance
-			new-amsProviders
-		}
-		# finish AMS deployment
-		if ($justRedeployAms) {
-			write-logFileWarning "All VMs in source resource group '$sourceRG' are still running"
-		}
-		write-stepEnd
-	}
-
-	#--------------------------------------------------------------
 	# Deploy Extensions
 	if (!$skipExtensions) {
 		deploy-sapMonitor
@@ -13213,7 +12568,6 @@ $targetRG2 = write-securestring ($targetRG -replace '\.', '-'   -replace '[^\w-_
 # default file paths
 $importPath 		= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.SOURCE.json"
 $exportPath 		= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$targetRG2.TARGET.json"
-$exportPathAms 		= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$targetRG2.AMS.json"
 $logPath			= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$targetRG2.TARGET.log"
 
 $timestampSuffix 	= (Get-Date -Format 'yyyy-MM-dd__HH-mm-ss')
@@ -13233,7 +12587,6 @@ if ($enableSourceRgMode) {
 # file names for backup RG
 if ($archiveMode) {
 	$exportPath 	= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.TARGET.json"
-	$exportPathAms 	= Join-Path -Path $pathExportFolder -ChildPath "rgcopy.$sourceRG2.AMS.json"
 }
 
 # create logfile
@@ -13286,7 +12639,6 @@ try {
 	write-logFileForbidden 'updateMode'				@('targetRG', 'targetLocation')
 	write-logFileForbidden 'justCreateSnapshots'	@('targetRG', 'targetLocation')
 	write-logFileForbidden 'justDeleteSnapshots'	@('targetRG', 'targetLocation')
-	write-logFileForbidden 'justRedeployAms'		@('targetRG', 'targetLocation')
 
 	# check name-parameter values
 	test-names
@@ -13316,23 +12668,6 @@ try {
 		$script:armTemplateFilePaths += $pathArmTemplate
 	}
 	
-	# given AMS ARM tempalte
-	if ($pathArmTemplateAms.length -ne 0) {
-	
-		if ($(Test-Path -Path $pathArmTemplateAms) -ne $True) {
-			write-logFileError "Invalid parameter 'pathArmTemplateAms'" `
-								"File not found: '$pathArmTemplateAms'"
-		}
-		$exportPathAms = $pathArmTemplateAms
-		$script:armTemplateFilePaths += $pathArmTemplateAms
-
-		if ( ($pathArmTemplate.length -eq 0) `
-		-and !$skipDeployment -and !$skipDeploymentVMs -and !$justRedeployAms ) {
-			write-logFileError "Invalid parameter 'pathArmTemplateAms'" `
-								"Parameter 'pathArmTemplate' must also be supplied"
-		}
-	}
-	
 	#--------------------------------------------------------------
 	# check software version
 	#--------------------------------------------------------------
@@ -13357,13 +12692,6 @@ try {
 		}
 	}
 	
-	# display Az.HanaOnAzure version
-	$azHoaVersion = (Get-InstalledModule Az.HanaOnAzure -ErrorAction 'SilentlyContinue')
-	if ($azHoaVersion.count -ne 0) {
-		$azHoaVersionString = $azHoaVersion.version
-	}
-	# check Az.HanaOnAzure version (minimum 0.3) in function new-templateTargetAms if AMS resource exists
-	
 	# check for running in Azure Cloud Shell
 	if (($env:ACC_LOCATION).length -ne 0) {
 		write-logFile 'RGCOPY running on Azure Cloud Shell:' -ForegroundColor 'yellow'
@@ -13376,7 +12704,6 @@ try {
 	write-logFileTab 'Powershell version'	$psVersionString -noColor
 	write-logFileTab 'Az version'			$azVersion.version -noColor
 	write-logFileTab 'Az.NetAppFiles'		$azAnfVersionString -noColor
-	write-logFileTab 'Az.HanaOnAzure'		$azHoaVersionString -noColor
 	write-logFileTab 'OS version'			$PSVersionTable.OS -noColor
 	write-logFile
 	
@@ -13644,9 +12971,6 @@ try {
 		if ('setVmZone' -notin $boundParameterNames) {
 			$setVmZone = @()
 		}
-		if ('setLoadBalancerSku' -notin $boundParameterNames) {
-			$setLoadBalancerSku = @()
-		}
 		if ('setPrivateIpAlloc' -notin $boundParameterNames) {
 			$setPrivateIpAlloc = @()
 		}
@@ -13708,14 +13032,13 @@ try {
 	}
 
 	# given templates
-	if (($pathArmTemplate.length -ne 0) -or ($pathArmTemplateAms.length -ne 0)) {
+	if ($pathArmTemplate.length -ne 0) {
 		$skipArmTemplate 	= $True
 		$skipSnapshots 		= $True
 		$skipBlobs 			= $True
 	}
 
 	# special cases:
-	test-justRedeployAms
 	test-archiveMode
 	test-justCopyBlobs
 	test-justCopyDisks
@@ -13770,13 +13093,6 @@ try {
 	if ($deleteTargetSA   ) {$doDeleteTargetSA  = '[X]'} else {$doDeleteTargetSA  = '[ ]'}
 	if ($stopVMsTargetRG  ) {$doStopVMsTargetRG = '[X]'} else {$doStopVMsTargetRG = '[ ]'}
 
-	if ($justRedeployAms -or $createArmTemplateAms -or ('pathArmTemplateAms' -in $boundParameterNames)) {
-		$doDeploymentAms   = '[X]'
-	}
-	else {
-		$doDeploymentAms   = '[ ]'
-	}
-
 	write-logFile 'Required steps:'
 	write-logFile "  $doArmTemplate Create ARM Template (refering to snapshots or BLOBs)"
 	write-logFile   "  $doSnapshots Create snapshots (of disks and volumes in source RG)"
@@ -13788,7 +13104,6 @@ try {
 	else {
 		write-logFile            "      Deployment: $doDeploymentVMs Deploy Virtual Machines"
 		write-logFile            "                  $doRestore Restore files"
-		write-logFile            "                  $doDeploymentAms Deploy Azure Monitor for SAP"
 		write-logFile            "                  $doExtensions Deploy Extensions"
 	}
 	write-logFile    "  $doWorkload Workload and Analysis"

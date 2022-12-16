@@ -88,5 +88,29 @@ bug fix| Increased minimum required PowerShell version to 7.2 (required for $PsS
 feature| New parameter `justCopyDisks`
 feature| Improved quota check
 documentation|Clarification about moving customer SAP landscapes to a different region using RGCOPY.
-bug fix| RGCOPY exports an ARM template from the source RG and modifies it.<BR>**The structure of this exported ARM template has changed:**. It now contains circular dependencies between:<UL><LI>vnets and their subnet</LI><LI>network security groups and their rules</LI><LI>NAT Gateways and their Public IP Prefixes</LI></UL>Therefore, a workaround had to be implemented in RGCOPY. All older versions of RGCOPY do not work anymore (at least in some regions).
+bug fix| RGCOPY exports an ARM template from the source RG and modifies it.<BR>**The structure of this exported ARM template has changed:**. It now contains `circular dependencies` between:<UL><LI>vnets and their subnet</LI><LI>network security groups and their rules</LI><LI>NAT Gateways and their Public IP Prefixes</LI></UL>Therefore, a workaround had to be implemented in RGCOPY. All older versions of RGCOPY do not work anymore.
 
+#### RGCOPY 0.9.40 December 2023
+type|change
+:---|:---
+warning|**Always install the newest version of PowerShell *and* az-cmdlets!** <BR>When installing the newest PowerShell (7.3.0) with older az-cmdlets then RGCOPY might terminate with the following error:<BR>`GenericArguments[0], 'Microsoft.Azure.Management.Compute.Models.VirtualMachine', on 'T MaxInteger[T](System.Collections.Generic.IEnumerable1[T])' violates the constraint of type 'T'.`<BR>If you install the newest az version 9.1.1 then RGCOPY works fine even with the newest PowerShell version 7.3.0
+UI| Removed support for AMS v1 as announced in February 2022.<BR>Remove parameters `pathArmTemplateAms`, `createArmTemplateAms`, `amsInstanceName`, `amsWsName`, `amsWsRG`, `amsWsKeep`, `amsShareAnalytics`, `dbPassword`, `amsUsePowerShell` and `justRedeployAms`.
+UI | Added a warning that ProximityPlacementGroups, AvailabilitySets and VmssFlex are removed if VM Tag `rgcopy.TipGroup` was used.
+bug fix|**The behavior of VMSS Flex has changed for Fault Domain Count FD>1:**<BR>The **current** behavior is the following: <ul><li>For M-Series VMs:<BR>You must not set the fault domain for the VM. If you do so, RGCOPY gives a warning: use parameter 'setVmFaultDomain' for setting fault domain to 'none'.<BR>Hereby, a VMSS Flex with FD>1 that contains M-series VMs behaves like an Availability Set.</li><li>For non M-Series VMs:<BR>You must now set the VMSS Flex property  `singlePlacementGroup` = `False`.<BR>This is done now automatically by RGCOPY. However, you can use RGCOPY parameter `singlePlacementGroup` for changing this (once the VMSS Flex behavior changes in the future).</li><li>Mixing M-Series VMs with other VMs is not allowed inside a VMSS Flex<BR>In this case, RGCOPY gives a warning.</li></ul>In older versions of RGCOPY you might get the deployment error:<BR>`Cannot set 'platformFaultDomain' on Virtual Machine 'hana2' because the Virtual Machine Scale Set 'vmss' that it references has 'singlePlacementGroup' = true. (Code:BadRequest)`
+ bug fix| **The semantic of zone definition for Public IP Addresses has changed (see below):**<BR>As a workaround, RGCOPY now always sets SKU = `Standard` and IPAllocationMethod = `Static` for Public IP Addresses. Parameters `setPublicIpSku` and `setPublicIpAlloc` have been removed.<BR>In older versions of RGCOPY you will see the following error when deploying a VM with a public IP address to an Availability Zone:<BR>`Compute resource /subscriptions/.../virtualMachines/... has a zone constraint 3 but the PublicIPAddress /subscriptions/... used by the compute resource via NetworkInterface or LoadBalancer has a different zone constraint Regional. (Code: ComputeResourceZoneConstraintDoesNotMatchPublicIPAddressZoneConstraint)`
+  UI| RGCOPY now always sets SKU = `Standard` for Load Balancers. Parameter `setLoadBalancerSku` has been removed.
+
+ Semantic changes of zone definition for Public IP Addresses:
+```
+WARNING: Upcoming breaking changes in the cmdlet ‘New-AzPublicIpAddress’ :
+Default behaviour of Zone will be changed
+Cmdlet invocation changes :
+ Old Way : Sku = Standard means the Standard Public IP is zone-redundant.
+ New Way : Sku = Standard and Zone = {} means the Standard Public IP has no zones. 
+ If you want to create a zone-redundant Public IP address, please specify 
+ all the zones in the region. For example, Zone = [‘1’, ‘2’, ‘3’]. 
+ ```
+
+
+
+ 

@@ -23,7 +23,3 @@ Write-Output ''
 Write-Output "Array count: $($rgcopyParameters.count)"
 Write-Output ($rgcopyParameters -as [string])
 Write-Output ''
-# [SecureString] parameter (if supplied):
-if ($Null -ne $dbPassword) {
-    Write-Output (ConvertFrom-SecureString -SecureString $dbPassword -AsPlainText)
-}
