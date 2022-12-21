@@ -90,7 +90,7 @@ feature| Improved quota check
 documentation|Clarification about moving customer SAP landscapes to a different region using RGCOPY.
 bug fix| RGCOPY exports an ARM template from the source RG and modifies it.<BR>**The structure of this exported ARM template has changed:**. It now contains `circular dependencies` between:<UL><LI>vnets and their subnet</LI><LI>network security groups and their rules</LI><LI>NAT Gateways and their Public IP Prefixes</LI></UL>Therefore, a workaround had to be implemented in RGCOPY. All older versions of RGCOPY do not work anymore.
 
-#### RGCOPY 0.9.40 December 2023
+#### RGCOPY 0.9.40 December 2022
 type|change
 :---|:---
 warning|**Always install the newest version of PowerShell *and* az-cmdlets!** <BR>When installing the newest PowerShell (7.3.0) with older az-cmdlets then RGCOPY might terminate with the following error:<BR>`GenericArguments[0], 'Microsoft.Azure.Management.Compute.Models.VirtualMachine', on 'T MaxInteger[T](System.Collections.Generic.IEnumerable1[T])' violates the constraint of type 'T'.`<BR>If you install the newest az version 9.1.1 then RGCOPY works fine even with the newest PowerShell version 7.3.0
@@ -110,6 +110,11 @@ Cmdlet invocation changes :
  If you want to create a zone-redundant Public IP address, please specify 
  all the zones in the region. For example, Zone = [‘1’, ‘2’, ‘3’]. 
  ```
+
+#### RGCOPY 0.9.42 December 2022
+type|change
+:---|:---
+bug fix| regression in RGCOPY 0.9.40 resulted in deployment errors when copying to a different region
 
 
 

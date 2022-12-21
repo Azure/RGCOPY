@@ -1,6 +1,6 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.40
+version:          0.9.42
 version date:     December 2022
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
@@ -9486,7 +9486,7 @@ function new-templateTarget {
 	# start output resource changes
 	Write-logFile 'Resource                                  Changes by RGCOPY' -ForegroundColor 'Green'
 	Write-logFile '--------                                  -----------------' -ForegroundColor 'Green'
-	write-logFileUpdates '*' '*' 'set location' $targetLocation '' ' (for all resources except sapMonitors)'
+	write-logFileUpdates '*' '*' 'set location' $targetLocation
 	write-logFileUpdates 'storageAccounts' '*' 'delete'
 	write-logFileUpdates 'snapshots'       '*' 'delete'
 	write-logFileUpdates 'disks'           '*' 'delete'
@@ -9508,6 +9508,14 @@ function new-templateTarget {
 	update-paramSetDiskMaxShares
 	update-paramSetDiskCaching
 	update-paramSetAcceleratedNetworking
+
+	# change LOCATION
+	$script:resourcesALL
+	| ForEach-Object -Process {
+		if ($_.location.length -ne 0) {
+			$_.location = $targetLocation
+		}
+	}
 
 	# remove identity
 	$script:resourcesALL
