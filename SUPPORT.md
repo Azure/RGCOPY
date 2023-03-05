@@ -20,7 +20,7 @@ The most important feature of RGCOPY is deploying an ARM template. This might fa
 
 #### Supported Azure resource types
 
-Azure is permanently releasing new resource types and new features for existing resources. RGCOPY only supports a limited set of resource types. It is simply impossible to support all of them. In particular, RGCOPY does not support *classic* VMs. Some features (e.g. Network Peering) are only supported for very specific boundary conditions. Adding support for further resource types to RGCOPY might or might not happen in the future.
+Azure is permanently releasing new resource types and new features for existing resources. RGCOPY only supports a limited set of resource types. It is simply impossible to support all of them. In particular, RGCOPY does not support *classic* VMs. Some features are only supported for very specific boundary conditions. Adding support for further resource types to RGCOPY might or might not happen in the future.
 A new feature of a supported resource might cause issues with RGCOPY in the future. Therefore, you should always use the newest version of RGCOPY.
 
 

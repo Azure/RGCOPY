@@ -64,7 +64,7 @@ feature| Since RGCOPY 0.9.30 Boot Diagnostics is not enabled by default. Hereby,
 UI| Remove ARM template parameter ~~`storageAccountName`~~. It is not needed anymore for Boot Diagnostics.
 feature| Allowing to run VM scripts on more than one VM. New syntax for scriptStartSapPath, scriptStartLoadPath and scriptStartAnalysisPath: `[local:]<path>@<VM>[,...n]`. Removing parameter ~~`scriptVm`~~ since it is not needed anymore. Remove the prefix ~~`command:`~~. Commands containing an @ now work even without the prefix.
 UI|New parameter `preSnapshotWaitSec`
-bug fix|Workaround for sporadic Azure issues when deploying subnets in parallel: create dependency chain in ARM template to prevent parallel deployment. Sporadic deployment error was: `Another operation on this or dependent resource is in progress`
+workaround for Azure changes|Workaround for sporadic Azure issues when deploying subnets in parallel: create dependency chain in ARM template to prevent parallel deployment. Sporadic deployment error was: `Another operation on this or dependent resource is in progress`
 
 #### RGCOPY 0.9.36 Mai 2022
 type|change
@@ -84,11 +84,11 @@ type|change
 bug fix| Regression when parameter `skipBastion` is used (one of 127 parameters): error during deployment "The resource 'Microsoft.Network/virtualNetworks/.../subnets/AzureBastionSubnet' is not defined in the template."
 feature| New experimental parameters:<BR>`diagSettingsSA`, `diagSettingsContainer`, `diagSettingsPub`, `diagSettingsProt`
 feature| New parameter switch `hostPlainText`<BR>Set this switch for getting better readable output when starting RGCOPY from a Linux script.
-bug fix| Increased minimum required PowerShell version to 7.2 (required for $PsStyle)
+UI| Increased minimum required PowerShell version to 7.2 (required for $PsStyle)
 feature| New parameter `justCopyDisks`
 feature| Improved quota check
 documentation|Clarification about moving customer SAP landscapes to a different region using RGCOPY.
-bug fix| RGCOPY exports an ARM template from the source RG and modifies it.<BR>**The structure of this exported ARM template has changed:**. It now contains `circular dependencies` between:<UL><LI>vnets and their subnet</LI><LI>network security groups and their rules</LI><LI>NAT Gateways and their Public IP Prefixes</LI></UL>Therefore, a workaround had to be implemented in RGCOPY. All older versions of RGCOPY do not work anymore.
+workaround for Azure changes| RGCOPY exports an ARM template from the source RG and modifies it.<BR>**The structure of this exported ARM template has changed:**. It now contains `circular dependencies` between:<UL><LI>vnets and their subnet</LI><LI>network security groups and their rules</LI><LI>NAT Gateways and their Public IP Prefixes</LI></UL>Therefore, a workaround had to be implemented in RGCOPY. All older versions of RGCOPY do not work anymore.
 
 #### RGCOPY 0.9.40 December 2022
 type|change
@@ -96,26 +96,27 @@ type|change
 warning|**Always install the newest version of PowerShell *and* az-cmdlets!** <BR>When installing the newest PowerShell (7.3.0) with older az-cmdlets then RGCOPY might terminate with the following error:<BR>`GenericArguments[0], 'Microsoft.Azure.Management.Compute.Models.VirtualMachine', on 'T MaxInteger[T](System.Collections.Generic.IEnumerable1[T])' violates the constraint of type 'T'.`<BR>If you install the newest az version 9.1.1 then RGCOPY works fine even with the newest PowerShell version 7.3.0
 UI| Removed support for AMS v1 as announced in February 2022.<BR>Remove parameters `pathArmTemplateAms`, `createArmTemplateAms`, `amsInstanceName`, `amsWsName`, `amsWsRG`, `amsWsKeep`, `amsShareAnalytics`, `dbPassword`, `amsUsePowerShell` and `justRedeployAms`.
 UI | Added a warning that ProximityPlacementGroups, AvailabilitySets and VmssFlex are removed if VM Tag `rgcopy.TipGroup` was used.
-bug fix|**The behavior of VMSS Flex has changed for Fault Domain Count FD>1:**<BR>The **current** behavior is the following: <ul><li>For M-Series VMs:<BR>You must not set the fault domain for the VM. If you do so, RGCOPY gives a warning: use parameter 'setVmFaultDomain' for setting fault domain to 'none'.<BR>Hereby, a VMSS Flex with FD>1 that contains M-series VMs behaves like an Availability Set.</li><li>For non M-Series VMs:<BR>You must now set the VMSS Flex property  `singlePlacementGroup` = `False`.<BR>This is done now automatically by RGCOPY. However, you can use RGCOPY parameter `singlePlacementGroup` for changing this (once the VMSS Flex behavior changes in the future).</li><li>Mixing M-Series VMs with other VMs is not allowed inside a VMSS Flex<BR>In this case, RGCOPY gives a warning.</li></ul>In older versions of RGCOPY you might get the deployment error:<BR>`Cannot set 'platformFaultDomain' on Virtual Machine 'hana2' because the Virtual Machine Scale Set 'vmss' that it references has 'singlePlacementGroup' = true. (Code:BadRequest)`
- bug fix| **The semantic of zone definition for Public IP Addresses has changed (see below):**<BR>As a workaround, RGCOPY now always sets SKU = `Standard` and IPAllocationMethod = `Static` for Public IP Addresses. Parameters `setPublicIpSku` and `setPublicIpAlloc` have been removed.<BR>In older versions of RGCOPY you will see the following error when deploying a VM with a public IP address to an Availability Zone:<BR>`Compute resource /subscriptions/.../virtualMachines/... has a zone constraint 3 but the PublicIPAddress /subscriptions/... used by the compute resource via NetworkInterface or LoadBalancer has a different zone constraint Regional. (Code: ComputeResourceZoneConstraintDoesNotMatchPublicIPAddressZoneConstraint)`
+workaround for Azure changes|**The behavior of VMSS Flex has changed for Fault Domain Count FD>1:**<BR>The **current** behavior is the following: <ul><li>For M-Series VMs:<BR>You must not set the fault domain for the VM. If you do so, RGCOPY gives a warning: use parameter 'setVmFaultDomain' for setting fault domain to 'none'.<BR>Hereby, a VMSS Flex with FD>1 that contains M-series VMs behaves like an Availability Set.</li><li>For non M-Series VMs:<BR>You must now set the VMSS Flex property  `singlePlacementGroup` = `False`.<BR>This is done now automatically by RGCOPY. However, you can use RGCOPY parameter `singlePlacementGroup` for changing this (once the VMSS Flex behavior changes in the future).</li><li>Mixing M-Series VMs with other VMs is not allowed inside a VMSS Flex<BR>In this case, RGCOPY gives a warning.</li></ul>In older versions of RGCOPY you might get the deployment error:<BR>`Cannot set 'platformFaultDomain' on Virtual Machine 'hana2' because the Virtual Machine Scale Set 'vmss' that it references has 'singlePlacementGroup' = true. (Code:BadRequest)`
+ workaround for Azure changes| **The semantic of zone definition for Public IP Addresses has changed (see below):**<BR>As a workaround, RGCOPY now always sets SKU = `Standard` and IPAllocationMethod = `Static` for Public IP Addresses. Parameters `setPublicIpSku` and `setPublicIpAlloc` have been removed.<BR>In older versions of RGCOPY you will see the following error when deploying a VM with a public IP address to an Availability Zone:<BR>`Compute resource /subscriptions/.../virtualMachines/... has a zone constraint 3 but the PublicIPAddress /subscriptions/... used by the compute resource via NetworkInterface or LoadBalancer has a different zone constraint Regional. (Code: ComputeResourceZoneConstraintDoesNotMatchPublicIPAddressZoneConstraint)`
   UI| RGCOPY now always sets SKU = `Standard` for Load Balancers. Parameter `setLoadBalancerSku` has been removed.
 
  Semantic changes of zone definition for Public IP Addresses:
 ```
 WARNING: Upcoming breaking changes in the cmdlet ‘New-AzPublicIpAddress’ :
-Default behaviour of Zone will be changed
+Default behavior of Zone will be changed
 Cmdlet invocation changes :
  Old Way : Sku = Standard means the Standard Public IP is zone-redundant.
  New Way : Sku = Standard and Zone = {} means the Standard Public IP has no zones. 
  If you want to create a zone-redundant Public IP address, please specify 
  all the zones in the region. For example, Zone = [‘1’, ‘2’, ‘3’]. 
  ```
-
 #### RGCOPY 0.9.42 December 2022
 type|change
 :---|:---
 bug fix| regression in RGCOPY 0.9.40 resulted in deployment errors when copying to a different region
 
+#### RGCOPY 0.9.44 March 2023
+type|change
+:---|:---
+bug fix| Fix ARM deployment error under the following conditions:<BR>1. The source resource group contains a VM that is connected to a vNet in a different resource group<BR>2. This vNet uses Network Peering to another vNet<BR>Network Peering and all its dependencies are now fully removed from the ARM template. This is possible because Network Peering has only been supported for AMS v1 and support for AMS v1 has been removed in RGCOPY 0.9.40.
 
-
- 

@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.42
-version date:     December 2022
+version:          0.9.44
+version date:     March 2023
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 Microsoft intern: https://github.com/Azure/RGCOPY-MS-intern
@@ -3853,7 +3853,7 @@ function update-paramSkipDisks {
 
 		# update number of data disks
 		$vmName = $script:copyDisks[$diskName].VM
-		if ($Null -ne $vmName) {
+		if ($vmName.Length -ne 0) {
 			$script:copyVMs[$vmName].NewDataDiskCount--
 		}
 	}
@@ -5528,50 +5528,6 @@ function update-subnets {
 }
 
 #--------------------------------------------------------------
-function update-networkPeerings {
-#--------------------------------------------------------------
-	# get remote virtualNetworkPeerings
-	$remotePeerings = @()
-	foreach ($res in $script:resourcesALL) {
-		if ($res.type -eq 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings' ) {
-			if ($res.properties.remoteVirtualNetwork.id[0] -eq '/') {
-				$remotePeerings += $res.name
-			}
-		}
-	}
-
-	# remove virtualNetworkPeerings to other resource groups
-	$i = 0
-	foreach ($peer in $remotePeerings) {
-		write-logFileUpdates 'virtualNetworkPeerings' $peer 'delete'
-		$i++
-	}
-	if ($i -ne 0) {
-		write-logFileWarning 'Peered Networks are supported by RGCOPY only within the same resource group'
-	}
-	remove-resources 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings' $remotePeerings
-
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Network/virtualNetworks'
-	| Where-Object {$_.properties.virtualNetworkPeerings.count -ne 0}
-	| ForEach-Object {
-
-		$_.properties.virtualNetworkPeerings = convertTo-array ($_.properties.virtualNetworkPeerings `
-																| Where-Object name -notin $remotePeerings)
-	}
-
-	# save names of remaining peered networks
-	$script:peeredVnets = @()
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Network/virtualNetworks'
-	| Where-Object {$_.properties.virtualNetworkPeerings.count -ne 0}
-	| ForEach-Object {
-
-		$script:peeredVnets += $_.name
-	}
-}
-
-#--------------------------------------------------------------
 function update-NICs {
 #--------------------------------------------------------------
 	# process existing NICs
@@ -5700,13 +5656,15 @@ function update-dependenciesAS {
 
 		$_.dependsOn = remove-dependencies $_.dependsOn -keep 'Microsoft.Compute/proximityPlacementGroups'
 	}
-	
 }
 
 #--------------------------------------------------------------
 function update-dependenciesVNET {
 #--------------------------------------------------------------
 	$subnetsAll = @()
+
+	# remove virtualNetworkPeerings 
+	remove-resources 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings'
 	
 	# workaround for following sporadic issue when deploying subnets:
 	#  "code": "Another operation on this or dependent resource is in progress.""
@@ -5717,6 +5675,9 @@ function update-dependenciesVNET {
 
 		# remove virtualNetworkPeerings from VNET
 		$_.properties.virtualNetworkPeerings = $Null
+
+		# remove dependencies to virtualNetworkPeerings
+		$_.dependsOn = remove-dependencies $_.dependsOn 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings'
 
 		# for virtualNetworkPeerings, there is a Circular dependency between VNETs
 		$_.dependsOn = remove-dependencies $_.dependsOn 'Microsoft.Network/virtualNetworks'
@@ -5751,17 +5712,6 @@ function update-dependenciesVNET {
 
 		# we have already defined the subnets as separate resource
 		$_.properties.subnets = $Null
-	}
-
-	# workaround for following sporadic issue when deploying virtualNetworkPeerings:
-	#  "code": "ReferencedResourceNotProvisioned"
-	#  "message": "Cannot proceed with operation because resource <vnet> ... is not in Succeeded state."
-	#  "Resource is in Updating state and the last operation that updated/is updating the resource is PutSubnetOperation."
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings'
-	| ForEach-Object -Process {
-
-		[array] $_.dependsOn += $subnetsAll
 	}
 }
 
@@ -8339,7 +8289,6 @@ function new-greenlist {
 	add-greenlist 'Microsoft.Network/virtualNetworks' 'addressSpace' 'addressPrefixes'
 	# add-greenlist 'Microsoft.Network/virtualNetworks' 'dhcpOptions' '*'
 	add-greenlist 'Microsoft.Network/virtualNetworks' 'subnets' '*'
-	add-greenlist 'Microsoft.Network/virtualNetworks' 'virtualNetworkPeerings' '*'
 	# add-greenlist 'Microsoft.Network/virtualNetworks' 'ipAllocations'
 
 	# subnets
@@ -8357,19 +8306,6 @@ function new-greenlist {
 	add-greenlist 'Microsoft.Network/virtualNetworks/subnets' 'networkSecurityGroup'
 	add-greenlist 'Microsoft.Network/virtualNetworks/subnets' 'networkSecurityGroup' 'id'
 	add-greenlist 'Microsoft.Network/virtualNetworks/subnets' 'routeTable' '*'
-
-	# virtualNetworkPeerings
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings"
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'allowForwardedTraffic'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'allowGatewayTransit'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'allowVirtualNetworkAccess'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'doNotVerifyRemoteGateways'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'remoteAddressSpace' '*'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'remoteBgpCommunities' '*'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'remoteVirtualNetwork'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'remoteVirtualNetwork' 'id'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'remoteVirtualNetworkAddressSpace' '*'
-	add-greenlist "Microsoft.Network/virtualNetworks/virtualNetworkPeerings" 'useRemoteGateways'
 
 	# networkInterfaces
 	add-greenlist 'Microsoft.Network/networkInterfaces'
@@ -9654,7 +9590,6 @@ function new-templateTarget {
 
 	update-NICs
 	update-subnets
-	update-networkPeerings
 
 	update-SKUs
 	update-IpAllocationMethod
