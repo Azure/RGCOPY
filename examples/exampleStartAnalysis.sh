@@ -13,7 +13,8 @@ echo "targetRG         = $targetRG"
 echo "targetLocation   = $targetLocation"
 # non-existing parameter:
 echo "dummy            = $dummy"
-# hostname of scrit that is running the VM:
+# host that is running the script:
 echo "vmName           = $vmName"
+echo "vmType           = $vmType"
 # array as string:
 echo "rgcopyParameters = $rgcopyParameters"

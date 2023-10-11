@@ -1,33 +1,30 @@
 # RGCOPY documentation
-**Version: 0.9.40<BR>December 2022**
+**Version: 0.9.54<BR>October 2023**
 ***
 
 ### Introduction
 
 RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group to a new resource group. The target RG might be in a different region, subscription or tenant. RGCOPY has been tested on **Windows**, **Linux** and in **Azure Cloud Shell**. It should run on **MacOS**, too.
 
-RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it [supports](./rgcopy-docu.md#Supported-Azure-Resources) the most important Azure resources needed for SAP, as virtual machines, managed disks and Load Balancers. However, you can use RGCOPY also for other workloads.
+RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it **[supports](./rgcopy-docu.md#Supported-Azure-Resources)** the most important Azure resources needed for SAP, as virtual machines, managed disks and Load Balancers. However, you can use RGCOPY also for other workloads.
 
->  :memo: **Note:** I'm frequently asked by SAP customers whether it's a good idea to use RGCOPY for moving their SAP landscape to a different region. The answer is: **it depends**. Actually, we are using RGCOPY for moving our SAP test landscapes. However, one should consider the following: <ul><li>RGCOPY performs a *copy*, not a *move*. Therefore, the SAP license becomes invalid. RGCOPY is not an SAP deployment tool. It just copies Azure resources. It does not change anything inside the VMs like changing the server name at the OS level or applying SAP license keys. </li><li> RGCOPY copies resources of a single Azure Resource Group. By default, it also copies the virtual network (to a new virtual network). Therefore, you cannot simply copy a landscape that is distributed over different resource groups and networks.</li><li> The resource types that are supported by RGCOPY is limited. Unsupported resources are not copied. RGCOPY can only copy resource groups that have less than 200 resources (This is a limitation of the Az cmdlet `Export-AzResourceGroup`, not of RGCOPY). </li><li> The downtime of a productive system would be quite huge because BLOB copy to a different region might take a whole day. If you just want to make a copy from production to a test system then downtime is very short: You just need to stop your productive servers for creating the disk snapshots.</li><li> Since it is a *copy* you might simply try RGCOPY. First of all, you should start RGCOPY with the parameter `simulate`. Hereby, you can detect possible issues: In the log file of RGCOPY you can see all unsupported resources. Furthermore, RGCOPY checks whether the used VM sizes are available in the target region and zone for your subscription. Furthermore, you can see whether the subscription quota (of VM families, total CPUs and disks) is sufficient. </li><li> You might use RGCOPY just for copying all disks (in parallel). For this, use the RGCOPY parameter switch `justCopyDisks`</li><li> Be aware, that RGCOPY has been developed and is maintained by a single person. It is an open source tool, not an official Microsoft product. You can report bugs using GitHub Issues but you will not get help from Microsoft Product Support.
-
-RGCOPY has 3 different operation modes. By default, RGCOPY is running in Copy Mode. 
-
-- In **[Copy Mode](./rgcopy-docu.md#Workflow)**, an ARM template is exported from the source RG, modified and deployed on the target RG. Hereby, you can change several [resource properties](./rgcopy-docu.md#Resource-Configuration-Parameters) in the target RG:
-    - Changing VM size, disk SKU, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking
-    - Adding, removing, and changing [availability](./rgcopy-docu.md#Parameters-for-Availability) configuration: Proximity Placement Groups, Availability Sets, Availability Zones, and VM Scale Sets
-    - Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa (on Linux VMs)
-    - Converting [Ultra SSD disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) to Premium SSD disks and vice versa (on Linux VMs)
-    - [Merging](./rgcopy-docu.md#Merging-and-Cloning-VMs) single VMs into an existing subnet (target RG already exists)
-    - [Cloning](./rgcopy-docu.md#Merging-and-Cloning-VMs) a VM inside a resource group (target RG = source RG)
-
-- In **[Archive Mode](./rgcopy-docu.md#Archive-Mode)**, a backup of all disks to cost-effective BLOB storage is created in an storage account of the target RG. An ARM template that contains the resources of the source RG is also stored in the BLOB storage. In this mode, no other resource is deployed in the target RG.
-
+RGCOPY has different operation modes. By default, RGCOPY is running in Copy Mode. 
+- In **[Copy Mode](./rgcopy-docu.md#Workflow)**, an BICEP or ARM template is exported from the source RG, modified and deployed in the target RG. Disks are copied using snapshots (and BLOBs when copying to a different region or subscription). You can change several [resource properties](./rgcopy-docu.md#Resource-Configuration-Parameters) in the target RG:
+    - Changing **VM size**, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking
+    - Adding, removing, and changing [availability](./rgcopy-docu.md#Parameters-for-Availability) configuration: **Proximity Placement Groups**, **Availability Sets**, **Availability Zones**, and **VM Scale Sets**
+    - Converting **disk SKUs** `Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`, `UltraSSD_LRS` and `PremiumV2_LRS` using (incremental) **snapshots**, snapshot copy and **BLOB copy**. Changing the logical sector size is not possible.
+    - Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa using **file copy**
+- In **[Clone Mode](./rgcopy-docu.md#Clone-Mode)**, a VM is cloned within the same resource group. This can be used for adding application servers
+- In **[Merge Mode](./rgcopy-docu.md#Merge-Mode)**, a VM is merged into a different resource group. This can be used for copying a jump box to a different resource group.
+- In **[Archive Mode](./rgcopy-docu.md#Archive-Mode)**, a backup of all disks to cost-effective BLOB storage is created in an storage account of the target RG. A BICEP/ARM template that contains the resources of the source RG is also stored in the BLOB storage. In this mode, no other resource is deployed in the target RG.
 - In **[Update Mode](./rgcopy-docu.md#Update-Mode)**, you can change resource properties in the source RG, for example VM size, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking. For saving costs of unused resource groups, RGCOPY can do the following:
-    - Changing disk SKU to 'Standard_LRS' (or any other SKU except for 'UltraSSD_LRS')
+    - Changing disk SKU to 'Standard_LRS' (if the source disk has a logical sector size of 512 byte)
     - Deletion of an Azure Bastion including subnet and IP Address (or creation of a Bastion)
     - Deletion of all snapshots in the source RG
     - Stopping all VMs in the source RG
     - Changing NetApp service level to 'Standard' (or any other service level)
+
+>  :memo: **Note:** I'm frequently asked by SAP customers whether it's a good idea to use RGCOPY for moving their SAP landscape to a different region. The answer is: **it depends**. Actually, we are using RGCOPY for moving our SAP test landscapes. However, one should consider the following: <ul><li>RGCOPY performs a *copy*, not a *move*. Therefore, the SAP license becomes invalid. RGCOPY is not an SAP deployment tool. It just copies Azure resources. It does not change anything inside the VMs like changing the server name at the OS level or applying SAP license keys. </li><li> RGCOPY copies resources of a single Azure Resource Group. By default, it also copies the virtual network (to a new virtual network). Therefore, you cannot simply copy a landscape that is distributed over different resource groups and networks.</li><li> The resource types that are supported by RGCOPY is limited. Unsupported resources are not copied.</li><li> The downtime of a productive system would be quite huge because BLOB copy to a different region might take a whole day. If you just want to make a copy from production to a test system then downtime is very short: You just need to stop your productive servers for creating the disk snapshots.</li><li> Since it is a *copy* you might simply try RGCOPY. First of all, you should start RGCOPY with the parameter `simulate`. Hereby, you can detect possible issues: RGCOPY checks whether the used VM sizes are available in the target region and zone for your subscription. Furthermore, you can see whether the subscription quota (of VM families, total CPUs and disks) is sufficient. </li><li> You might use RGCOPY just for copying all disks (in parallel). For this, use the RGCOPY parameter `justCopyDisks`</li><li> Be aware, that RGCOPY has been developed and is maintained by a single person. It is an open source tool, not an official Microsoft product. You can report bugs using GitHub Issues but you will not get help from Microsoft Product Support.
 
 This documentation is also available using the following command:
 
@@ -55,10 +52,12 @@ $rgcopyParameter = @{
 <div style="page-break-after: always"></div>
 
 ### Installation
-- Install **PowerShell** 7.1.2 (or higher)
-- Install Azure PowerShell Module **Az** 6.0 (or higher): <BR>`Install-Module -Name Az -Scope AllUsers -AllowClobber -Force`
-- Copy `rgcopy.ps1` into the user home directory (~)
-- In PowerShell 7, run `Connect-AzAccount` for each subscription and each Azure Account that will be used by RGCOPY. The Azure Account needs privileges for creating the target RG and for creating snapshots in the source RG.
+- Install **PowerShell** 7.3 (or higher)
+- Install Azure PowerShell Module **Az** 10.0 (or higher): <BR>`Install-Module -Name Az -Scope AllUsers -AllowClobber -Force`
+- Download the RGCOPY repository from GitHub (`Download ZIP` from the popup-menu `<> Code`). Unblock the downloaded zip file using the PowerShell command `Unblock-File -path <zip file name>` and extract the zip file.
+- Copy `rgcopy.ps1` into the user home directory (~).
+- Install the BICEP tools as described in https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/install. RGCOPY tries to install BICEP on its own if it is not already installed, see [Using Bicep](./rgcopy-docu.md#Using-Bicep)
+- In PowerShell 7, run `Connect-AzAccount -Subscription '<Subscription Name>'` for each subscription and each Azure Account that will be used by RGCOPY. The Azure Account needs privileges for creating the target RG and for creating snapshots in the source RG.
 
 > :bulb: **Tip:** You can run RGCOPY also in **Azure Cloud Shell**. However, you have to copy the file **`rgcopy.ps1`** into Azure Cloud Drive first. There is no need to install PowerShell or Az module in Azure Cloud Shell. In this case, you do not have to run `Connect-AzAccount` since you are already connected. 
 
@@ -138,15 +137,44 @@ In **Copy Mode**, the workflow of RGCOPY consists of the following steps. RGCOPY
 
 Step|parameter<BR>skip switch|usage
 :---|:---|:---
-:clock12: *create ARM template*|**`skipArmTemplate`**|This step creates an ARM template (json file) that will used for deploying in the target RG. <BR>:memo: **Note:** The template refers either to the snapshots in the source RG or to BLOBs in the target RG. Therefore, the template is only valid as long as the snapshots and BLOBs exist.<BR>:warning: **Warning:** Using various RGCOPY parameters, you can change [properties](./rgcopy-docu.md#Resource-Configuration-Parameters) of resources (e.g. VM size) compared with the Source RG. Be aware that some properties are changed to default values even when not explicitly using RGCOPY parameters.
-:clock1: *create snapshots*|**`skipSnapshots`**|This step creates snapshots of disks (and [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks)) in the source RG. During this time, VMs with more than one data disk must be stopped. See section [Application Consistency](./rgcopy-docu.md#Application-Consistency) for details. <BR> :bulb: **Tip:** When setting parameter switch **`stopVMsSourceRG`**, RGCOPY stops *all* VMs in the source RG before creating snapshots.
-:clock2: *create backups*|**`skipBackups`**|This step is only needed when using (or converting) [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) on LINUX. A file backup of specified mount points is created on an Azure SMB file share in the source RG.
-:clock3: *create BLOBs*|**`skipBlobs`**|This step is needed when the source RG and the target RG are not in the same region. The snapshots in the source RG are copied as [BLOBs](./rgcopy-docu.md#Parameters-for-BLOB-Copy) into a storage account in the target RG. Dependent on the disk sizes and the region, this might take several hours.
-:clock4: *deployment*|**`skipDeployment`**|The deployment consists of several part steps:<ul><li>*deploy VMs:* Deploy ARM template in the target RG.<BR>Part step can be skipped by **`skipDeploymentVMs`**</li><li>*restore backups:* Restore file backup on disks or [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) in the target RG if needed.<BR> Part step can be skipped by **`skipRestore`**</li><li>*install VM Extensions*: install [VM Extensions](./rgcopy-docu.md#VM-Extensions) if explicitly configured using RGCOPY parameters.<BR>Part step can be skipped by **`skipExtensions`**</li></ul>
+:clock12: *create BICEP or ARM template*|**`skipArmTemplate`**|This step creates the BICEP (or ARM) template that will used for deploying in the target RG. <BR>:memo: **Note:** The template refers either to the snapshots in the source RG or to BLOBs in the target RG. Therefore, the template is only valid as long as the snapshots and BLOBs exist.<BR>:warning: **Warning:** Using various RGCOPY parameters, you can change [properties](./rgcopy-docu.md#Resource-Configuration-Parameters) of resources (e.g. VM size) compared with the Source RG. Be aware that some properties are changed to default values even when not explicitly using RGCOPY parameters.
+:clock1: *create snapshots*|**`skipSnapshots`**|This step creates snapshots of disks (and [NetApp Volumes](./rgcopy-docu.md#File-Copy-of-NetApp-Volumes)) in the source RG. During this time, VMs with more than one data disk must be stopped. See section [Application Consistency](./rgcopy-docu.md#Application-Consistency) for details. <BR> :bulb: **Tip:** When setting parameter switch **`stopVMsSourceRG`**, RGCOPY stops *all* VMs in the source RG before creating snapshots.
+:clock2: *create backups*|**`skipBackups`**|This step is only needed when using (or converting) [NetApp Volumes](./rgcopy-docu.md#File-Copy-of-NetApp-Volumes) on LINUX. A file backup of specified mount points is created on an Azure SMB file share in the source RG.
+:clock3: *create BLOBs or copy snapshots*|**`skipBlobs`**|This step is needed when the source RG and the target RG are not in the same region. The snapshots in the source RG are copied as [BLOBs](./rgcopy-docu.md#Parameters-for-BLOB-Copy) into a storage account in the target RG. Dependent on the disk sizes and the region, this might take several hours.<BR>In some cases, snapshot copy can be used rather than BLOB creation. See table below.
+:clock4: *deployment*|**`skipDeployment`**|The deployment consists of several part steps:<ul><li>*deploy VMs:* Deploy BICEP (or ARM) template in the target RG.<BR>Part step can be skipped by **`skipDeploymentVMs`**</li><li>*restore backups:* Restore file backup on disks or [NetApp Volumes](./rgcopy-docu.md#File-Copy-of-NetApp-Volumes) in the target RG if needed.<BR> Part step can be skipped by **`skipRestore`**</li><li>*install VM Extensions*: install [VM Extensions](./rgcopy-docu.md#VM-Extensions) if explicitly configured using RGCOPY parameters.<BR>Part step can be skipped by **`skipExtensions`**</li></ul>
 :clock5: *start workload*| *optional step* | This step is used for testing SAP Workload. It has to be explicitly activated using switch **`startWorkload`**.
 :clock6: *cleanup*| *optional step* | By default, created snapshots are not deleted by RGCOPY. <BR>:bulb: **Tip:** you can activate a cleanup using RGCOPY parameters. See section [Cost Efficiency](./rgcopy-docu.md#Cost-Efficiency) for details.
 
 > :bulb: **Tip:** When setting the parameter switch **`simulate`**, only an ARM template is created. All other steps are skipped. This is useful for checking whether configured resource changes are possible (VM size available in target region? Disk properties compatible with VM size? Subscription quota sufficient? ...)
+
+
+### Disk Creation
+
+The following table explains the needed steps for disk creation in the target RG. These steps depend if an **ultra SKU** (`UltraSSD_LRS`, `PremiumV2_LRS`) or an **usual SKU** (`Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`) is used for the disk in the source RG.
+"same az-user" means that parameters `sourceSubUser` and `targetSubUser` are identical.
+
+source SKU<BR>`RGCOPY switch`|target<ul><li>same az-user</li><li>same region</li><li>any subscription</li></ul>|target<ul><li>same az-user</li><li>different region</li></ul><BR>|target<ul><li>different az-user</li></ul><BR><BR>
+:---|:---|:---|:---
+usual SKU|- full snapshot|- full snapshot<BR>- create **BLOB** in target|- full snapshot<BR>- create **BLOB** in target
+ultra SKU|- incremental snapshot|- incremental snapshot<BR>- create **BLOB** in target|- incremental snapshot<BR>- create **BLOB** in target
+any SKU<BR>`useBlobs`|- full / incremental snapshot<BR>- create **BLOB** in target|- full / incremental snapshot<BR>- create **BLOB** in target|- full / incremental snapshot<BR>- create **BLOB** in target
+any SKU<BR>`useSnapshotCopy`|- incremental snapshot<BR>- copy **snapshot** to target|- incremental snapshot<BR>- copy **snapshot** to target|- incremental snapshot<BR>- create **BLOB** in target
+
+ > :memo: **Note:** An ultra SKU can use a logical sector size of either 512 byte or 4 KB. A disk that is using an ultra SKU with a **locical sector size of 512 byte** can be converted to any SKU. However, a disk is that using an ultra SKU with 4 KB locical sector size can only be converted to an ultra SKU.
+
+ > :memo: **Note:** Snapshot copy to a different region is often faster than BLOB copy. You can enable snapshot copy by using RGCOPY parameter `useSnapshotCopy`. However, you cannot use parameter `skipSnapshots` in this case.
+
+### Using Bicep
+As of version 0.9.50, Rgcopy is creating a BICEP template rather than an ARM template (You still can use ARM templates by setting RGCOPY parameter `useBicep = $False`). Using BICEP has several advantages:
+- You can copy a source RG with more than 200 resources. This is not possible when using ARM templates caused by a limitation of `Export-AzResourceGroup`
+- RGCOPY copies all supported resources from the source RG. In addition, it copies all supported resources that are directly or indirectly referenced by a virtual machine, even when these resources are located in a different resource group. However, all VMs and all disks must be located in the source RG.
+For example, a VM might be part of a Proximity Placement Group (PPG) that is stored in a different resource group. In this case, the VM and the PPG are both copied and will be stored in the target RG. However, it is not possible to copy 2 resources with the same type and same name (for example, a VM is using 2 network interface cards: a NIC with name NIC1 in resource group RG1 and a NIC with name NIC1 in resource group RG2).
+- The created BICEP template is better readable compared with the ARM template. The ARM template contains more dependencies which caused some unexpected trouble in the past. Therefore, we expect a more reliable deployment when using BICEP.
+
+The BICEP version used by RGCOPY is determined in the following order:
+1. If BICEP is installed (found in the path) then this version is used.
+2. If BICEP is not installed then RGCOPY downloads the newest version of BICEP from GitHub.
+3. If the download fails **on Linux** then RGCOPY is looking for the file `bicep` in the directory of the file `rgcopy.ps1` and is using this one. 
 
 <div style="page-break-after: always"></div>
 
@@ -159,8 +187,8 @@ The resource group parameters are essential for running RGCOPY:
 parameter|[DataType]: usage
 :---|:---
 **`sourceRG`**			|**[string]**: name of the source resource group<ul><li> parameter is **mandatory**</li></ul>
-**`targetRG`**			|**[string]**: name of the target resource group<ul><li> parameter is **mandatory** in **Copy Mode** and **Archive Mode**</li><li>parameter is **not allowed** in **Update Mode** </li></ul> :memo: **Note:** Source and target resource group must not be identical unless you use parameter `setVmMerge` as described below.<BR>:memo: **Note:** The target resource group might already exist. However, it should not contain resources. For safety reasons, RGCOPY does not allow using a target resource group that already contains disks (unless you set switch parameter **`allowExistingDisks`**).
-**`targetLocation`**	|**[string]**: *location name* of the Azure region for the target RG, for example 'eastus'.<ul><li>parameter is **mandatory** in **Copy Mode** and **Archive Mode**</li><li> parameter is **not allowed** in **Update Mode**</li></ul>:memo: **Note:** Use the location name (for example, 'eastus'). Do **not** use the *display name* ('East US') instead.
+**`targetRG`**			|**[string]**: name of the target resource group<ul><li> parameter is **mandatory** in **Copy Mode** and  **Archive Mode**</li><li>parameter is **optional** in **Merge Mode** </li><li>parameter is **not allowed** in **Update Mode** and **Clone Mode** </li></ul> :memo: **Note:** Source and target resource group must not be identical except in **Merge Mode**<BR>:memo: **Note:** The target resource group might already exist. However, it should not contain resources. For safety reasons, RGCOPY does not allow using a target resource group that already contains disks (unless you set switch parameter **`allowExistingDisks`**).
+**`targetLocation`**	|**[string]**: *location name* of the Azure region for the target RG, for example 'eastus'.<ul><li>parameter is **mandatory** in **Copy Mode** and **Archive Mode**</li><li> parameter is **not allowed** in **Update Mode** and **Clone Mode**</li></ul>:memo: **Note:** Use the location name (for example, 'eastus'). Do **not** use the *display name* ('East US') instead.
 **`targetSA`**         |**[string]**: name of the storage account that will be created in the target RG for storing BLOBs.
 **`sourceSA`**         |**[string]**: name of the storage account that will be created in the source RG for storing file backups. This storage account is only created when parameter **`createVolumes`** or **`createDisks`** is set.
 
@@ -179,7 +207,7 @@ The cmdlet opens the default browser and you can enter account name and password
 
 RGCOPY can use two different Azure accounts for connecting to the source RG and the target RG. In this case, you must run `Connect-AzAccount` for both accounts before starting RGCOPY. Furthermore, you must provide the RGCOPY connection parameters as described below. Hereby, RGCOPY knows which account has to be used for which resource group.
 
-PowerShell caches the Azure context only for a few hours. Once it is expired, you must run `Connect-AzAccount` again.
+PowerShell caches the Azure context. However, the lifetime of the cache might be limited. Once the cache is expired, you must run `Connect-AzAccount` again.
 
 !["RGCOPY"](/images/failedAzAccount.png)
 
@@ -237,7 +265,9 @@ The following resource configuration parameters exist:
 parameter|usage (data type is always [string] or [array])
 :---|:---
 **`setVmSize`** =<BR>`@("size@vm1,vm2,...", ...)`	|Set VM Size: <ul><li>**size**: VM size (e.g. Standard_E32s_v3) </li><li>**vm**: VM name</li></ul> 
-**`setDiskSku`** =<BR>`@("sku@disk1,disk2,...", ...)`			|Set Disk SKU (default value is **Premium_LRS**):  <ul><li>**sku** in {Premium_LRS, StandardSSD_LRS, Standard_LRS, Premium_ZRS, StandardSSD_ZRS} </li><li>**disk**: disk name</li></ul> :warning: **Warning:** If you want to avoid using the default value then you must explicitly set **setDiskSku** = `$Null`.
+**`setDiskSku`** =<BR>`@("sku@disk1,disk2,...", ...)`			|Set Disk SKU (default value is **Premium_LRS**):  <ul><li>**sku** in {`Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`, `PremiumV2_LRS`, `UltraSSD_LRS`} </li><li>**disk**: disk name</li></ul> :memo: **Note:** There are several restrictions:<ul><li> Converting **from** `PremiumV2_LRS` or `UltraSSD_LRS` requires incremental snapshots. RGCOPY does not support incremental snapshots if there already exists another incremental snapshot (not created by RGCOPY). Creating an 1TB disk from an incremental snapshot can take more then 1 hour.</li><li> Converting **to** `PremiumV2_LRS` or `UltraSSD_LRS` requires a zonal deployment. Therefore, parameter `setVmZone` must be used. </li><li> Converting **from** `PremiumV2_LRS` or `UltraSSD_LRS` to a different SKU is only possible if the logical sector size is 512.</li><li>When converting from a different SKU **to** `PremiumV2_LRS` or `UltraSSD_LRS`, the logical sector size is set to 512.</li></ul>:warning: **Warning:** If you want to avoid using the default value then you must explicitly <BR>set **setDiskSku = $Null**.
+**`setDiskIOps`** = <BR>`@("iops@disk1,disk1,...", ...)`|Set Disk IOps: <ul><li>**iops**: maximum IOs per second</li><li>**disk**: disk name</li></ul>:memo: **Note:** This parameter only works for Premium V2 disks. It cannot be used for Ultra SSD disks.
+**`setDiskMBps`** = <BR>`@("mbps@disk1,disk1,...", ...)`|Set Disk MBps: <ul><li>**mbps**: maximum MB per second</li><li>**disk**: disk name</li></ul>:memo: **Note:** This parameter only works for Premium V2 disks. It cannot be used for Ultra SSD disks.
 **`setDiskSize`** = <BR>`@("size@disk1,disk1,...", ...)`			|Set Disk Size: <ul><li>**size** in GB </li><li>**disk**: disk name</li></ul> :warning: **Warning:** It's only possible to *increase* the size of a disk. Partitions on the disk are not changed. This parameter was originally intended for increasing disk I/O on the target RG. Nowadays, you better should use parameter `setDiskTier` instead.
 **`setDiskTier`** = <BR>`@("tier@disk1,disk1,...", ...)`			|Set Disk Performance Tier:<ul><li>**tier** in {P0, P1, ..., P80} </li><li>**disk**: disk name</li></ul>:memo: **Note:** To remove existing  performance tier configuration, set tier to P0.
 **`setDiskBursting`** = `@("bool@disk1,disk2,...", ...)`|Set Disk Bursting: <ul><li>**bool** in {True, False} </li><li>**disk**: disk name</li></ul> 
@@ -247,14 +277,15 @@ parameter|usage (data type is always [string] or [array])
 **`setPrivateIpAlloc`** = <BR>`@("allocation@ip1,ip2,...", ...)`		|Set Private IP Allocation Method: <ul><li>**allocation** in {Dynamic, Static}</li><li>**ip**: name of Private IP Address.</li></ul>
 **`removeFQDN`** = <BR>`@("bool@ip1,ip2,...", ...)`		|Remove Fully Qualified Domain Names: <ul><li>**bool** in {True}</li><li>**ip**: name of Public IP Address.</li></ul>
 **`setAcceleratedNetworking`** = <BR>`@("bool@nic1,nic2,...", ...)`		|Set Accelerated Networking: <ul><li>**bool** in {True, False} </li><li>**nic**: name of Virtual Network Interface.</li></ul>
-**`createVolumes`**<BR>**`createDisks`**<BR>**`snapshotVolumes`**|see section [NetApp Volumes and Ultra SSD Disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks).
+**`createVolumes`**<BR>**`createDisks`**<BR>**`snapshotVolumes`**|see section [NetApp Volumes](./rgcopy-docu.md#File-Copy-of-NetApp-Volumes).
+**`ultraSSDEnabled`**|**[switch]**: By default, VMs in the target RG only support Ultra SSD disks if such a disk is already attached. If you want to attach a new Ultra SSD disk later then you must set this RGCOPY switch when creating the target RG.
 
 ### Default values
 RGCOPY uses default parameter values in **Copy Mode**. If you do not want this then set parameter switch **`skipDefaultValues`** or explicitly set the individual parameters to a different value. In **Archive Mode** and **Update Mode** no default values are used. These are the default values in **Copy Mode**:
 
 parameter|default value|default behavior
 :---|:---:|:---
-**`setDiskSku`**        |'Premium_LRS'   |converts all disks to Premium SSD<BR>(except Ultra SSD disks - they cannot be copied directly)
+**`setDiskSku`**        |'Premium_LRS'   |converts all disks to `Premium_LRS` if they originally were `StandardSSD_LRS` or `Standard_LRS`.
 **`setVmZone`**         |0             |removes zone configuration from VMs
 **`setPrivateIpAlloc`** |'Static'        |sets allocation of Private IP Addresses to Static
 **`setAcceleratedNetworking`**|$True    |enables Accelerated Networking
@@ -296,7 +327,7 @@ parameter|[DataType]: usage
 parameter|[DataType]: usage
 :---|:---
 **`skipVMs`**|**[array] of VM names**: These VMs and their disks are not copied by RGCOPY.<BR>:memo: **Note:** NICs that are bound only to these VMs and Public IP Addresses are skipped, too. However, NICs that are also bound to Load Balancers are still copied.
-**`skipDisks`**|**[array] of disk names**: These disks are not copied by RGCOPY.<BR> :warning: **Warning:** Take care with this parameter. Starting their VMs could fail in the target RG. See section [NetApp Volumes and Ultra SSD disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks)
+**`skipDisks`**|**[array] of disk names**: These disks are not copied by RGCOPY.<BR> :warning: **Warning:** Take care with this parameter. Starting their VMs could fail in the target RG. See section [NetApp Volumes](./rgcopy-docu.md#File-Copy-of-NetApp-Volumes)
 **`skipSecurityRules`**|**[array] of name patterns**: default value: `@('SecurityCenter-JITRule*')`<BR>Skips all security rules that name matches any element of the array.<BR>:memo: **Note:** By default, only Just-in-Time security rules are skipped (This is needed to avoid permanently opend ports in the target RG). All other security rules are copied.
 **`skipAvailabilitySet`**<BR>**`skipProximityPlacementGroup`**|see [Parameters for Availability](./rgcopy-docu.md#Parameters-for-Availability)
 **`skipBastion`**|**[switch]**: do not copy Azure Bastion from source RG
@@ -310,7 +341,7 @@ RGCOPY can change Availability Zones, Availability Sets and Proximity Placement 
 
 parameter|[DataType]: usage
 :---|:---
-**`setVmZone`** = <BR>`@("zone@vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 1, 2, 3} </li><li>**vm**: VM name </li></ul>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone information
+**`setVmZone`** = <BR>`@("zone@vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 1, 2, 3} </li><li>**vm**: VM name </li></ul>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone information<BR>:bulb: **Tip:** Disks are always created in the same zone as their VMs. Detached disks are only copied when parameter `copyDetachedDisks` was set. In this case, the detached disks are created in the zone that is defined by parameter **`defaultDiskZone`** (with default value 0).
 **`setVmFaultDomain`** = <BR>`@("fault@vm1,vm2,...", ...)`			|Set VM Fault Domain: <ul><li>**fault**: Used Fault Domain in {none, 0, 1, 2} </li><li>**vm**: VM name </li></ul>:bulb: **Tip:**  The value 'none' removes the Fault Domain configuration from the VM.<BR>:warning: **Warning:** Values {0, 1, 2} are only allowed if the VM is part of a VMSS Flex.
 **`skipVmssFlex`**|**[switch]**: do not copy existing VM Scale Sets Flexible. <BR>Hereby, the target RG does not contain any VM Scale Set.
 **`skipAvailabilitySet`**|**[switch]**: do not copy existing Availability Sets. <BR>Hereby, the target RG does not contain any Availability Set.
@@ -386,11 +417,9 @@ You can change the BLOB copy behavior using the following parameters:
 parameter|[DataType]: usage
 :---|:---
 **`useBlobs`**         |**[switch]**: Always create BLOBs (for testing), even in the same region and tenant.<BR>:warning: **Warning:** Using BLOBs is much slower compared with using snapshots in the same region. Therefore, this parameter is only useful for testing RGCOPY.
-**`useBlobsFromDisk`** |**[switch]**: Always create BLOBs from disks (rather than using snapshots from disks).<BR>This is useful when you want to copy a resource group where you have no privileges for creating snapshots.<BR>:warning: **Warning:**  When using this parameter, all VMs in the source RG must be deallocated.
 **`grantTokenTimeSec`**|**[int]**: Time in seconds, default value: `3*24*3600`<BR>Before copying the BLOBs, access tokens are generated for the snapshots (or disks). These access tokens expire after 3 days. If the BLOB copy takes longer, then it fails. You can define a longer token life time using this parameter (before starting the BLOB copy).
 **`waitBlobsTimeSec`**|**[int]**: Time in seconds, default value: `5*60`<BR>Since the copy process can take hours, the progress is displayed every 5 minutes by RGCOPY. This time interval can be changed using this parameter.
 **`restartBlobs`**|**[switch]**: If RGCOPY fails while the BLOB copy process is still running asynchronously then you can restart RGCOPY using the same parameters plus the *additional* switch parameter `restartBlobs`. In this case, the BLOB copy process is not interrupted. You do not have to start copying from the very beginning.<BR>This is useful when your local PC rebooted while RGCOPY was running or when your cached credentials expired. However, this does not work when snapshot access tokens have expired.
-**`justCopyDisks`**|**[switch]**: When setting this parameter, disk snapshots are created and copied as BLOBs to the target RG. Afterwards, the disks are created in the target RG. No other resources are deployed in the target RG.
 
 If the BLOBs already exist in the target region, then you can use them by setting the following parameters:
 
@@ -430,20 +459,18 @@ parameter|[DataType]: usage
 <div style="page-break-after: always"></div>
 
 ***
-## NetApp Volumes and Ultra SSD Disks
+## File Copy of NetApp Volumes
 
-In Azure, you cannot create a snapshot from an Ultra SSD Disk. You cannot export the snapshot of a NetApp volume to a BLOB or restore it in another region. Therefore, RGCOPY cannot directly copy Ultra SSD disks or NetApp volumes. However, RGCOPY supports Ultra SSD disks and NetApp volumes on LINUX using file copy (rather than disk or volume copy). Herby, the following scenarios are possible:
+In Azure, you cannot export the snapshot of a NetApp volume to a BLOB or restore it in another region. Therefore, RGCOPY cannot directly copy NetApp volumes. However, RGCOPY supports NetApp volumes on LINUX using file copy (rather than disk or volume copy). Hereby, the following scenarios are possible:
 
 source RG|target RG|procedure
 :---|:---|:---
 Disks|NetApp volumes NFSv4.1|skip disks and create new volumes
 NetApp volumes|Premium SSD disks|create new Premium SSD disks
 NetApp volumes|NetApp volumes NFSv4.1|create new volumes
-Ultra SSD disks|Premium SSD disks|skip Ultra SSD disks and create new Premium SSD disks
-Disks|Ultra SSD disks|skip disks and create new Ultra SSD disks
-Ultra SSD disks|Ultra SSD disks|skip Ultra SSD disks and create new Ultra SSD disks
 
-> :warning: **Warning:** Unlike other RGCOPY features, NetApp Volumes and Ultra SSD Disks require running code inside the source RG and the target RG. **Therefore, the stability of this feature depends on the OS and other running software inside the VMs.** This feature has been tested with SUSE Linux Enterprise Server and SAP workload. Using this feature is on your own risk. To be on the save side, you should use database backup and restore rather than converting the database disks using RGCOPY.
+
+> :warning: **Warning:** Unlike other RGCOPY features, File Copy requires running code inside the source RG and the target RG. **Therefore, the stability of this feature depends on the OS and other running software inside the VMs.** This feature has been tested with SUSE Linux Enterprise Server and SAP workload. Using this feature is on your own risk. To be on the save side, you should use database backup and restore rather than converting the database disks using RGCOPY.
 
 For the source RG, RGCOPY must know the mount points inside the VMs for all disks and volumes. Hereby, RGCOPY can backup all files that are stored in these mount points to an SMB share in the source RG. In the target RG, new disks or volumes are created for these mount points. After that, RGCOPY restores the files from the SMB share to the mount points in the target RG.
 
@@ -522,55 +549,6 @@ createDisks = @(
 )
 ```
 
-#### Copying Ultra SSD Disks
-
-For this scenario, you have to set two parameters:
-- **`skipDisks`** = `@(`**`"UssdDiskName1"`**`, ...)`<BR>The parameter contains the names of *all* Ultra SSD disks in the source RG.
-- **`createDisks`** = `@(`**`"size/iops/mbps@mp1,mp2,..."`**`, ...)`<BR>This is similar as above. You have to specify the mount points for each Ultra SSD disk. **size** is the size of the new disk in the target RG. By specifying **iops** (maximum number of IOs per second) and **mbps** (maximum MiB per second), RGCOPY creates an Ultra SSD disk rather than a Premium SSD disk.
-
-Example:
-```powershell
-skipDisks = @(
-    'ultraDisk1',
-    'ultraDisk2'
-)
-createDisks = '1024/2048/8 @ vmName/disks/disk1, vmName/disks/disk2'
-```
-
-#### Converting disks to Ultra SSD Disks
-
-In this scenario, you need the same parameters as in the last scenario. The difference is that the skipped disks do not need to be Ultra SSD disks:
-- **`skipDisks`** = `@(`**`"diskName1"`**`, ...)`<BR>The parameter contains the names of all data disks that have to be converted.
-- **`createDisks`** = `@(`**`"size/iops/mbps@,mp1,mp2,..."`**`, ...)`<BR>By specifying iops and mbps, RGCOPY creates an Ultra SSD disk rather than a Premium SSD disk.
-
-Example:
-```powershell
-skipDisks = @(
-    'disk1', 
-    'disk2'
-)
-createDisks = @(
-    '1024/2048/8 @ vmName/disks/disk1', 
-    '1024/2048/8 @ vmName/disks/disk2'
-)
-```
-
-#### Converting Ultra SSD Disks to Premium SSD Disks
-
-This is similar to copying Ultra SSD disks. The difference is that you create Premium SSD disks in the target RG rather than Ultra SSD disks:
-
-- **`skipDisks`** = `@(`**`"UssdDiskName1"`**`, ...)`<BR>The parameter contains the names of *all* Ultra SSD disks in the source RG
-- **`createDisks`** = `@(`**`"size@mp1,mp2,..."`**`, ...)`<BR>See parameter description above.
-
-Example:
-```powershell
-skipDisks = @(
-    'ultraDisk1', 
-    'ultraDisk2'
-)
-createDisks = @('1024 @ vmName/disks/disk1, vmName/disks/disk2')
-```
-
 ### Changing number and path of mount points
 
 In the scenarios above, you could change the storage type (disk or volume) and size. However, you were not able to change the number of mount points. However, RGCOPY also supports the following scenario: Assume, you are using 3 disks for the 3 SAP HANA mount points:
@@ -600,10 +578,143 @@ parameter|[DataType]: usage
 <div style="page-break-after: always"></div>
 
 ***
+## Clone Mode
+
+In Clone mode, one or more VMs are cloned within the same resource group. Hereby, a new VM is created using a copy of the disks and having the same configuration as the original VM. The OS name of original and clone is identical. However, new names are created for the Azure resources (VM, Disk, NIC and Public IP Address). The clone can be part of none, the same, or a different Availability Zone, Availability Group, Proximity Placement Group and VMSS Flex. Original and clone are attached to the same virtual subnet. This is possible since the following changes are done:
+- The original VM is stopped
+- An Azure Read Only resource lock is created that prevents starting the original VM
+- Private IP Addresses of the clone are changed to dynamic
+
+Use cases for Clone Mode are for example:
+- **Creating a copy of an application server**<BR>After cloning an application Server, the following manual steps are needed;
+    - renaming the cloned VM on OS level, setting new static IP addresses (if wanted), updating application configuration (e.g. SAP profiles)
+    - removing the Read Only resource lock and starting the original VM
+- **Changing availability configuration**<BR>You might want to move from an Availability Set or Proximity Placement group to a VMSS Flex. Therefore, you normally have to delete the VM and re-create it with the new availability configuration. This might fail for any reason (e.g. quota issue). As a result, the original VM is away.<BR>When using RGCOPY with Clone Mode, the original VM still exists until you manually delete it after deploying and testing the clone. If the cloning fails then you can manually remove the Read Only lock and start the original VM.
+
+The following parameters can be set in Clone Mode:
+
+parameter|[DataType]: usage
+:---|:---
+**`cloneMode`**|**[switch]**: Turns on Clone Mode.
+**`cloneVMs`**|**[array]**: Names of the VMs that will be cloned.
+**`setVmName`**	= <BR>`@("vmNameClone@vmNameOriginal", ...)`	|Set the names of the cloned VMs: <ul><li>**vmNameClone**: VM name of the cloned VM in the source RG </li><li>**vmNameOriginal**: VM name in source RG </li></ul>RGCOPY does not rename the *host* name of the VM. You have to do this on OS level inside the VM after the VM has been cloned.<BR><BR>The names of the cloned VMs are calculated automatically when not using `setVmName`. The calculated names end with `-clone<number>` (`-clone1`, `-clone2`...). RGCOPY searches for a free clone number that can be used for all cloned VMs, disks, NICs and Public IP Addresses. By setting RGCOPY parameter `cloneNumber` you can define the starting point of this search.
+**`attachVmssFlex`**	= <BR>`@("vmssFlexName@vmNameOriginal", ...)`	|By default, the cloned VMs are detached from their Virtual Machine Scale Set. However, you can attach them to the same or a different VM Scale Set (compared with the original VM) using this parameter:<ul><li>**vmssFlexName**: VM name of an existing VM Scale Set Flexible in the source RG</li><li>**vmNameOriginal**: VM name in source RG </li></ul>
+**`attachAvailabilitySet`**	= <BR>`@("avSetName@vmNameOriginal", ...)`	|By default, the cloned VMs are detached from their Availability Set. However, you can attach them to the same or a different Availability Set (compared with the original VM) using this parameter:<ul><li>**avSetName**: VM name of an existing Availability Set in the source RG</li><li>**vmNameOriginal**: VM name in source RG </li></ul>
+**`attachProximityPlacementGroup`**	= <BR>`@("ppgRG/ppgName@vmNameOriginal", ...)`<BR><BR>**`attachProximityPlacementGroup`**	= <BR>`@("ppgName@vmNameOriginal", ...)`|By default, the cloned VMs are detached from their Proximity Placement Group. However, you can attach them to the same or a different Proximity Placement Group (compared with the original VM) using this parameter:<ul><li>**ppgRG**: Resource group that contains the Proximity Placement Group</li><li>**ppgName**: VM name of an existing Proximity Placement Group</li><li>**vmNameOriginal**: VM name in source RG </li></ul>
+**`setVmSize`**<BR>**`setVmZone`**<BR>**`setVmFaultDomain`**<BR>**`setDiskSize`**<BR>**`setDiskTier`**<BR>**`setDiskBursting`**<BR>**`setDiskCaching`**<BR>**`setDiskSku`**|Same parameters as in **Copy Mode**. They are described in section [Resource Configuration Parameters](./rgcopy-docu.md#Resource-Configuration-Parameters). Be aware that these parameters only have an impact on the newly created resources in the sourceRG. Already existing resources are not modified (except setting a ReadOnly lock on the cloned VMs).
+
+Example for cloning application servers and attaching them to a new VMSS Flex
+
+```powershell
+# create VMSS Flex Config
+$paramConfig = @{
+    Location                    = 'eastus'
+    OrchestrationMode           = 'Flexible'
+    PlatformFaultDomainCount    = 1
+    Zone                        = @('1', '2')
+}
+$vmssConfig = New-AzVmssConfig @paramConfig
+# create VMSS Flex 
+$paramVmss = @{
+    ResourceGroupName           = 'sap_test'
+    VMScaleSetName              = 'vmssZone'
+    VirtualMachineScaleSet      = $vmssConfig
+}
+New-AzVmss @paramVmss
+
+# clone VMs
+$rgcopyParameter = @{
+    sourceRG                    = 'sap_test'
+    cloneMode                   = $True
+    cloneVMs = @(
+        'appserver1'
+        'appserver2'
+    )
+    setVmZone = @(
+        '1 @ appserver1'
+        '2 @ appserver2'
+    )
+    attachVmssFlex              = 'vmssZone'
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+<div style="page-break-after: always"></div>
+
+***
+## Merge Mode
+
+In Merge mode, one or more VMs are merged into another resource group. Hereby, a new VM is created using a copy of the disks. A single NIC is created and attached to the virtual subnet that is defined by parameter `setVmMerge`. If the original VM has at least one public IP address then a single public IP address is created for the new VM.
+
+The following limitations exist in Merge Mode:
+- The target RG must already exist and contain the virtual subnets  that are defined by parameter `setVmMerge`
+- The VM name on OS level is not changed
+- Source RG and target RG are typically different (indeed, the two RGs could be identical. However, in this case you should rather use Clone Mode)
+
+Merge Mode can be used, for example, for copying a jumpbox from one resource group to a different subnet in another resource group.
+
+The following parameters can be set in Merge Mode:
+
+parameter|[DataType]: usage
+:---|:---
+**`mergeMode`**|**[switch]**: Turns on Merge Mode.
+**`setVmMerge`**= <BR>`@("net/subnet@vm1,vm2", ...)`|**[string] or [array]**: Merge VMs of the source RG into an existing subnet of the target RG:<ul><li>**vm**: VM name in source RG</li><li>**net**: vnet name in target RG</li><li>**subnet**: subnet name in target RG</li></ul>When setting this parameter, *only* the specified VMs and their disks are copied. The disks are automatically renamed. A new network interface using a dynamic IP address (IPv4) is created and attached to the existing subnet (in the target RG). A new public IP address is created if any network interface of the VM in the source system has a public IP address.
+**`setVmName`**<BR><BR>**`attachVmssFlex`**<BR>**`attachAvailabilitySet`**<BR>**`attachProximityPlacementGroup`**<BR><BR>**`setVmSize`**<BR>**`setVmZone`**<BR>**`setVmFaultDomain`**<BR>**`setDiskSize`**<BR>**`setDiskTier`**<BR>**`setDiskBursting`**<BR>**`setDiskCaching`**<BR>**`setDiskSku`**|Same parameters as in **Clone Mode**.
+
+The following example copies VMs 'app1' and 'app2' from the source RG ('source_rg') and merges them into the subnet 'vnet/subnet' of the target RG ('target_rg'). The VM names in the target RG are changed to 'appserver1' and 'appserver2' and the availablilty zone for these VMs is set in the target RG. Keep in mind that RGCOPY changes only the Azure resource names of these VMs. The names on OS level are not changed!
+
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'source_rg'
+    targetRG        = 'target_rg'
+    targetLocation  = 'eastus'
+    MergeMode       = $True
+
+    setVmMerge = @(
+        'vnet/subnet @ app1'
+        'vnet/subnet @ app2'
+    )
+    setVmName = @(
+        'appserver1 @ app1'
+        'appserver2 @ app2'
+    )
+    setVmZone = @(
+        '1 @ app1'
+        '2 @ app2'
+    )
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+
+<div style="page-break-after: always"></div>
+
+***
+## Comparing RGCOPY Modes
+
+
+
+feature|Copy Mode|Merge Mode|Clone Mode
+:---|:---|:---|:---
+deployment| target RG only|target RG<BR>(target RG might be <BR>same as source RG)|source RG only
+virtual network|a copied VM is attached to a copied subnet<BR>in the target RG that has the same name<BR>as the original subnet in the source RG| a merged VM can be attached to<BR>any subnet that exists in the target RG|a cloned VM and the original VM are always attached to the same subnet
+changes in<BR>source RG|snapshots|<ul><li>snapshots</li><li>if source RG = target RG:</li><ul><li>new VMs and disks</li><li>new single NIC per VM</li><li>new Public IP Address if <BR>original VM has at least one</li></ul></ul>|<ul><li>snapshots</li><li>new VMs and disks</li><li>copies all NICs of cloned VMs</li><li>copies all Public IP Addresses of cloned NICs</li><li>create Read Lock on original VMs</li></ul>
+resource names|<ul><li>same names as in source RG</li><li>name of VMs can be changed <BR>using `setVmName`<BR>(OS host name does not change)</li><li>name of disks can be changed<BR>using switch `renameDisks`</li></ul>|<ul><li>same names as in source RG</li><li>name of VMs can be changed<BR>using `setVmName`<BR>(must be changed if<BR> source RG = target RG)</li><li>disk names are always changed automatically</li></ul>|<ul><li>new unique names are created automatically</li><li>Names can be changed using<BR>`setVmName`<BR>`renameDisks`</li></ul>
+Availability resources<ul><li>PPGs</li><li>AvSets</li><li>VMSS Flex</li></ul>|<ul><li>resources copied by default</li><li>VMs keep being attached. This can be changed using <BR>`skipProximityPlacementGroup`<BR>`skipAvailabilitySet`<BR>`skipVmssFlex`</li><li>changes possible by creating new resources using<BR>`createProximityPlacementGroup`<BR>`createAvailabilitySet`<BR>`createVmssFlex`</li></ul>|<ul><li>resources **not** copied<BR>(required PPGs, AvSets, VMSS<BR>have to be created manually<BR>before starting RGCOPY)</li><li>VMs detached by default</li><li>VMs can be attached using<BR>`attachProximityPlacementGroup`<BR>`attachAvailabilitySet`<BR>`attachVmssFlex`</li><li>attaching VM to PPG in different RG possible</li></ul>| see Merge Mode
+Availability Zone|**removed** by default<BR>(can be changed using `setVmZone`)|**copied** by default<BR>(can be changed using `setVmZone`)|see Merge Mode
+Disk SKU|set to **Premium_LRS** by default<BR>(can be changed using `setDiskSku`)|**copied** by default<BR>(can be changed using `setDiskSku`)|see Merge Mode
+
+
+
+
+<div style="page-break-after: always"></div>
+
+
+***
 ## Archive Mode
 Stopping not needed VMs reduces Azure costs. However, premium disks can cause a significant part of the overall costs. You will be charged for the disks even when all VMs have been stopped. One solution would be changing the disk SKU from Premium_LRS to Standard_LRS. This can be done easily using RGCOPY [Update Mode](./rgcopy-docu.md#Update-Mode).
 
-In **Archive Mode**, a backup of all disks to cost-effective BLOB storage is created. An ARM template that contains the resources of the source RG is also stored in the BLOB storage. After that, you could delete the source RG for saving costs. You can restore the original source RG using the saved ARM template **in the same region**. However, you cannot use RGCOPY for modifying the saved ARM template. This might be needed if you have reached your subscription quota for a used VM size at the point in time you want to restore. Regardless of this, you can always manually modify the ARM template and deploy it without using RGCOPY.
+In **Archive Mode**, a backup of all disks to cost-effective BLOB storage is created. An BICEP or ARM template that contains the resources of the source RG is also stored in the BLOB storage. After that, you could delete the source RG for saving costs. You can restore the original source RG using the saved BICEP or ARM template **in the same region**. However, you cannot use RGCOPY for modifying the saved template. This might be needed if you have reached your subscription quota for a used VM size at the point in time you want to restore. Regardless of this, you can always manually modify the template and deploy it without using RGCOPY.
 
 > :warning: **Warning:** Be careful when deleting the source RG. RGCOPY does not copy *all* resources in the source RG (see section [Supported Azure Resources](./rgcopy-docu.md#Supported-Azure-Resources)). When using Archive Mode, you should carefully read all warnings in the RGCOPY log file *before* deleting the source RG.
 
@@ -618,7 +729,7 @@ $rgcopyParameter = @{
     sourceSub       = 'Contoso Subscription'
     sourceRG        = 'contoso_source_rg'
 
-    targetRG        = 'contoso_backup_rg'
+    targetRG        = 'contoso_backups'
     targetLocation  = 'eastus'
     archiveMode     = $True
 }
@@ -627,7 +738,7 @@ $rgcopyParameter = @{
 
 After running this, the BLOB storage will contain the following files:
 - one BLOB for each disk containing the backup
-- the file rgcopy.arm-templates.zip that contains all exported ARM templates, the generated ARM template by RGCOPY and a PowerShell script that can be used for restoring the source RG.
+- the file rgcopy.arm-templates.zip that contains all exported templates, the generated BICEP or ARM template and a PowerShell script that can be used for restoring the source RG.
 - the RGCOPY zip file containing all logs
 
 The generated PowerShell script in this example looks like this:
@@ -635,23 +746,22 @@ The generated PowerShell script in this example looks like this:
 ```powershell
 # generated script by RGCOPY for restoring
 $param = @{
-    sourceSubUser       = 'user@contoso.com'
-    
-    # do not change:
-    sourceSub           = 'Contoso Subscription'
-    sourceRG            = 'contoso_backup_rg'
-    targetLocation      = 'eastus'
-
     # set targetRG:
+    targetSub           = 'Contoso Subscription'
     targetRG            = 'contoso_source_rg'
-    
-    # set pathArmTemplate:
+
+    #--- do not change the rest of the parameters:
+    sourceSub           = 'Contoso Subscription'
+    sourceRG            = 'contoso_backups'
+    targetLocation      = 'eastus'
     pathArmTemplate     = 'C:\Users\user\rgcopy.contoso_source_rg.TARGET.json'
+    #---
 }
 C:\Users\user\rgcopy.ps1 @param
 ```
+> :memo: **Note:** You can only deploy an archived resource group in the region where the BLOBs are located. Therefore, changing the parameter `targetLocation` in the script above is not allowed.
 
-The following special parameters can be set in Archive Mode:
+The following parameters can be set in Archive Mode:
 
 parameter|[DataType]: usage
 :---|:---
@@ -663,10 +773,11 @@ parameter|[DataType]: usage
 **`deleteSnapshots`**| Same parameter as in **Copy Mode**. This are described in section [Cost Efficiency](./rgcopy-docu.md#Cost-Efficiency).
 **`setVmSize`**<BR>**`setDiskSize`**<BR>**`setDiskTier`**<BR>**`setDiskCaching`**<BR>**`setDiskSku`**<BR>**`setAcceleratedNetworking`**|Same parameters as in **Copy Mode**. They are described in section [Resource Configuration Parameters](./rgcopy-docu.md#Resource-Configuration-Parameters). Be aware that these parameters only have an impact on the created ARM template. The ARM template is not deployed. Properties are not changed in the source RG when using these parameters in **Archive Mode**
 
-In Archive Mode all disks are copied, including detached disks. However, in this mode you cannot copy or convert **Ultra SSD disks** or **NetApp volumes**. You should use parameter `skipVMs` for VMs that have an Ultra SSD disk. parameter `skipDisks` is not allowed in Archive Mode. Once parameter `skipVMs` is set, detached disks are not copied (unless you set parameter `copyDetachedDisks`).
-For archiving **Ultra SSD disks** or **NetApp volumes**, you might create a copy of the source RG using parameters `createDisks` and `createVolumes` in RGCOPY **Copy Mode** first. Hereby you can convert them to Premium Storage. In a next step, you can use **Archive Mode** for creating a backup of the just created resource group.
+In Archive Mode all disks are copied, including detached disks. However, in this mode you cannot copy **NetApp volumes**. Parameter `skipDisks` is not allowed in Archive Mode. Once parameter `skipVMs` is set, detached disks are not copied (unless you set parameter `copyDetachedDisks`).
+
 
 <div style="page-break-after: always"></div>
+
 
 ***
 ## Update Mode
@@ -690,7 +801,7 @@ parameter|[DataType]: usage
 **`updateMode`**|**[switch]**: Turns on Update Mode
 **`simulate`**|**[switch]**: You can use this switch for checking the status of the source RG. Once this switch is set, nothing is changed in the source RG. Instead, the expected changes are displayed. 
 **`stopVMsSourceRG`** |**[switch]**: When setting this switch, RGCOPY stops all VMs in the source RG. <BR>Be aware, that *all* VMs must be stopped anyway when using Update Mode.
-**`setVmSize`**<BR>**`setDiskSize`**<BR>**`setDiskTier`**<BR>**`setDiskCaching`**<BR>**`setDiskSku`**<BR>**`setAcceleratedNetworking`**|Same parameters as in **Copy Mode**. However, this time they are used for changing the source RG using Az cmdlets. The parameters are described in section [Resource Configuration Parameters](./rgcopy-docu.md#Resource-Configuration-Parameters).<BR>You can combine all these parameters. RGCOPY will update all required resources (VMs, disks, NICs). When there are several changes of a single resource then the resource will only be updated once (containing all changes). 
+**`setVmSize`**<BR>**`setDiskSize`**<BR>**`setDiskTier`**<BR>**`setDiskCaching`**<BR>**`setDiskSku`**<BR>**`setDiskBursting`**<BR>**`setDiskMaxShares`**<BR>**`setAcceleratedNetworking`**|Same parameters as in **Copy Mode**. However, this time they are used for changing the source RG using Az cmdlets. The parameters are described in section [Resource Configuration Parameters](./rgcopy-docu.md#Resource-Configuration-Parameters).<BR>You can combine all these parameters. RGCOPY will update all required resources (VMs, disks, NICs). When there are several changes of a single resource then the resource will only be updated once (containing all changes). 
 **`deleteSnapshots`** |**[switch]**: When setting this switch, RGCOPY deletes snapshots with the extension **'.rgcopy'**. These snapshots have been originally created by RGCOPY.
 **`deleteSnapshotsAll`** |**[switch]**: When setting this switch, RGCOPY deletes **all** snapshots in the source RG.
 **`createBastion`** =<BR>`'<addrPrefix>@<vnet>'`|Create Bastion:<ul><li>**vnet:** existing virtual Network name</li><li>**addrPrefix:** Address Prefix that is used for creating the new subnet</li></ul>When setting this parameter the following is created in the source RG by RGCOPY:<ul><li>a new subnet 'AzureBastionSubnet'</li><li>a new Public IP Address 'AzureBastionIP'</li><li>a new Bastion 'AzureBastion'.</li></ul>
@@ -700,7 +811,7 @@ parameter|[DataType]: usage
 **`netAppMoveForce`** | **[switch]** Parameter for test purposes<BR>When setting this switch, volumes are moved to a new pool even when the Service Level already fits parameter `netAppServiceLevel`
 **`netAppPoolName`** | **[string]** in Update mode: Name of the newly created pool if parameter `netAppMovePool` is also set.<BR>By default, the created pool has the name `rgcopy-s1-<old-pool>`, `rgcopy-p1-<old-pool>`, `rgcopy-u1-<old-pool>` (for Service Level **S**tandard, **P**remium, **U**ltra).<BR>If the name already exists then the number is increased, for example `rgcopy-s2-my_old_pool_name`.
 
-In Update Mode, you cannot convert Ultra SSD disks or NetApp volumes using parameters `createDisks` and `createVolumes`. **Detached disks** are not ignored in Update Mode. There is no explicit parameter for excluding disks (like `skipDisk` or `skipVMs`). You can update *all* disks or explicitly specify the disk you want to update. Not specified disks are not processed. For example:
+**Detached disks** are not ignored in Update Mode. There is no explicit parameter for excluding disks (like `skipDisk` or `skipVMs`). You can update *all* disks or explicitly specify the disk you want to update. Not specified disks are not processed. For example:
 
 ```powershell
 $rgcopyParameter = @{
@@ -749,21 +860,88 @@ $rgcopyParameter = @{
 <div style="page-break-after: always"></div>
 
 ***
+## Copy disks
+By using parameter **`justCopyDisks`**, you can copy all or specific disks from the source RG to the target RG. This includes detached disks. 
+
+When setting this parameter, disk snapshots are created and copied as BLOBs to the target RG if needed. Afterwards, the disks are created from the snapshots or BLOBs. No other resources are deployed in the target RG.
+
+The zone property of the disks is also copied. If you want to deploy the disks in the target RG in a different zone then you must set parameter **`defaultDiskZone`**. This parameter is applied to all disks. Setting it to `0` will remove zonal deployment. However, disks of SKU `UltraSSD_LRS` or `PremiumV2_LRS` will always use zonal deployment.
+
+Example 1: copy all disks
+
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'contoso_source_rg'
+    targetRG        = 'contoso_target_rg'
+    targetLocation  = 'eastus'
+
+    justCopyDisks   = $True
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+Example 2: copy specific disks to zone 1
+
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'contoso_source_rg'
+    targetRG        = 'contoso_target_rg'
+    targetLocation  = 'eastus'
+
+    justCopyDisks   = @('disk1', 'disk2')
+    defaultDiskZone = 1
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+Example 3: copy all disks without zonal deployment
+
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'contoso_source_rg'
+    targetRG        = 'contoso_target_rg'
+    targetLocation  = 'eastus'
+
+    justCopyDisks   = @('disk1', 'disk2')
+    defaultDiskZone = 0
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+When a disk with the same name already exists in the target RG then you can use parameter **`defaultDiskName`** to copy a *single* disk and rename it. For example:
+
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'contoso_source_rg'
+    targetRG        = 'contoso_target_rg'
+    targetLocation  = 'eastus'
+
+    justCopyDisks   = @('disk1')
+    defaultDiskZone = 0
+    defaultDiskName = 'disk1_newName'
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+<div style="page-break-after: always"></div>
+
+***
 ## Starting Scripts from RGCOPY
 
 RGCOPY can start scripts in specific scenarios. These are either [locally running scripts](./rgcopy-docu.md#Locally-running-scripts) (PowerShell scripts running on the same machine that runs RGCOPY) or [remotely running scripts](./rgcopy-docu.md#Remotely-running-scripts) (scripts running inside the VMs). These scripts have to be developed on your own. RGCOPY continues once the scripts have finished. The ouptut of the scripts is contained in the RGCOPY log file (when using `Write-Output` or `echo`).
 
-In addition, RGCOPY starts scripts for backup/restore. These scripts are part of RGCOPY and cannot be changed. They are used for copying [NetApp Volumes and Ultra SSD Disks](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks).
+In addition, RGCOPY starts scripts for backup/restore. These scripts are part of RGCOPY and cannot be changed. They are used for copying [NetApp Volumes](./rgcopy-docu.md#File-Copy-of-NetApp-Volumes).
 
 
 
 RGCOPY passes the following parameters to your scripts:
 1. All supplied RGCOPY parameters.
 2. Some of the optional RGCOPY parameters, even when not supplied. For example `targetSub`.
-3. Parameter `sourceLocation` that contains the region of the source RG
-4. Parameter `vmName` that contains the name of the VM that is running the script (or your local machine name for locally running scripts).
-5. Parameters `vmSize<vmName>`, `vmCpus<vmName>`, `vmMemGb<vmName>` that contain Azure VM size configuration for all deployed VMs. `<vmName>` is the Azure name of the VM that only contains word characters and numbers. All special characters are removed.
-6. Parameter `rgcopyParameters` that contains the names of all passed parameters.
+3. Parameter **`sourceLocation`** that contains the region of the source RG
+4. Parameter **`vmName`** that contains the name of the VM that is running the script (or your local machine name for locally running scripts).
+5. Parameter **`vmType`** that contains the value of the VM tag `rgcopy.VmType` of the VM that is running the script.
+6. Parameters **`vmSize<vmName>`**, **`vmCpus<vmName>`**, **`vmMemGb<vmName>`** that contain Azure VM size configuration for all deployed VMs. `<vmName>` is the Azure name of the VM that only contains word characters and numbers. All special characters are removed.
+7. Parameter **`rgcopyParameters`** that contains the names of all passed parameters.
 
 In all scripts you can simply access the passed parameters using variables, for example `$targetSub`. Only *remotely* running *PowerShell* scripts must contain a `param` clause.
 
@@ -839,36 +1017,6 @@ $rgcopyParameter = @{
 ***
 ## Special cases
 
-### Merging and Cloning VMs
-Normally, RGCOPY is used for copying all resources of a source RG into a new (or empty) target RG. By using parameter `setVmMerge` you can copy discrete VMs and attach them to an existing subnet in the target RG. You can use this to copy a standard VM (e.g. jump box) into several other resource groups.
-
-> :warning: **Warning:** `setVmMerge` is an experimental parameter that might or might not work.
-
-By using parameter `setVmName`, you can rename the VMs in the target RG. Herby, you can copy a VM even in the source RG (source RG = target RG). The VM disks are automatically renamed. You might use this for cloning application servers. Be aware that parameter `setVmName` does not rename the VM on OS level.
-
-parameter|[DataType]: usage
-:---|:---
-**`setVmMerge`**= <BR>`@("net/subnet@vm1,vm2", ...)`|**[string] or [array]**: Merge VMs of the source RG into an existing subnet of the target RG:<ul><li>**vm**: VM name in source RG</li><li>**net**: vnet name in target RG</li><li>**subnet**: subnet name in target RG</li></ul>When setting this parameter, *only* the specified VMs and their disks are copied. The disks are automatically renamed. A new network interface using a dynamic IP address (IPv4) is created and attached to the existing subnet (in the target RG). A new public IP address is created if any network interface of the VM in the source system has a public IP address.
-**`setVmName`**	= <BR>`@("vmNameNew@vmNameOld", ...)`			|Rename VM: <ul><li>**vmNameOld**: VM name in source RG </li><li>**vmNameNew**: VM name in target RG </li></ul>This renames the Azure *resource* name of the copied VM in the target RG. It does not touch the original VM. RGCOPY does not rename the *host* name of the VM. You have to do this on OS level inside the VM after the VM has been copied.<BR>You can use this parameter also independent from `setVmMerge`.
-**`renameDisks`**|**[switch]**: Renames all disks of all VMs with the following naming convention:<BR>- OS disk: `<vmName>__disk_os`<BR>- Data disks: `<vmName>__disk_lun_<lunNumber>`<BR>This parameter is automatically set when using parameter `setVmMerge`. However, you can set this parameter also independent from `setVmMerge`.
-**`setVmZone`**<BR>**`setVmFaultDomain`**<BR>**`createAvailabilitySet`**<BR>**`createProximityPlacementGroup`**<BR>**`createVmssFlex`**| These parameters have already been described above. They can also be used in combination with `setVmMerge`. However, they work differently in this case:<BR>No *new* Availability Set, Proximity Placement Group or VM Scale Set is created. Instead, they already have to exist in the target RG.
-
-The following example clones the VM 'app1' to 'app2' and puts the new VM app2 into the existing availability set 'avset1'.
-In this example, the source RG and the target RG are identical. Keep in mind that this does not change the OS name of 'app2'. This has to be done after RGCOPY has created the azure resource 'app2':
-
-```powershell
-$rgcopyParameter = @{
-    sourceRG               = 'SAP_master'
-    targetRG               = 'SAP_master'
-    targetLocation         = 'westus'
-
-    setVmMerge             = 'vnet/subnet @ app1'
-    setVmName              = 'app2 @ app1'
-    createAvailabilitySet  = 'avset1/3/5 @ app1'
-}
-.\rgcopy.ps1 @rgcopyParameter
-```
-
 ### VM Extensions
 You can install several VM extensions. You can skip the installation of all extensions by using RGCOPY switch parameter `skipExtensions`.
 
@@ -887,14 +1035,14 @@ The following parameters activate additional steps at the very end of an RGCOPY 
 parameter|[DataType]: usage
 :---|:---
 **`deleteSnapshots`** |**[switch]**: By setting this switch, RGCOPY deletes those **snapshots** in the source RG that have been created by the current run of RGCOPY.<BR>When skipping some VMs or disks, RGCOPY does not create snapshots of these disks and does not delete them afterwards.
-**`deleteSourceSA`** |**[switch]**: By setting this switch, RGCOPY deletes the storage account in the source RG that has been used for storing **file backups** (during the copy process of NetApp volumes or Ultra SSD disks).
+**`deleteSourceSA`** |**[switch]**: By setting this switch, RGCOPY deletes the storage account in the source RG that has been used for storing **file backups** (during the copy process of NetApp volumes).
 **`deleteTargetSA`** |**[switch]**: By setting this switch, RGCOPY deletes the storage account in the target RG that has been used for storing **BLOBs** (when copying to a different region).
 **`stopVMsTargetRG`** |**[switch]**: When setting this switch in **Copy Mode**, RGCOPY stops all VMs in the target RG after deploying it. Typically, this is not what you want. However, it might be useful for saving costs when deploying a resource group that is not used immediately.
 
 Tip: You can use the following RGCOPY parameters for reducing cost in the target RG: `setVmSize`, `setDiskSku`, `setDiskTier`, `createDisksTier`, `netAppServiceLevel`, `netAppPoolGB`, `smbTier`, and `skipBastion`.
 The *default* values of some RGCOPY parameters also have some cost impact. See parameters `createDisksTier` and `setDiskSku` above.
 
-The behavior of RGCOPY changed for copying NetApp volumes or Ultra SSD disks. It now starts only *needed* Ms in the source RG. These VMs are stopped again by RGCOPY. In earlier versions of RGCOPY *all* VMs were started in the source RG and you had to stop them on your own.
+The behavior of RGCOPY changed for copying NetApp volumes. It now starts only *needed* VMs in the source RG. These VMs are stopped again by RGCOPY. In earlier versions of RGCOPY *all* VMs were started in the source RG and you had to stop them on your own.
 
 <div style="page-break-after: always"></div>
 
@@ -902,46 +1050,32 @@ The behavior of RGCOPY changed for copying NetApp volumes or Ultra SSD disks. It
 ## Appendix
 
 ### Supported Azure Resources
-RGCOPY uses a list of well-known resources and properties. **All other resources in the source Resource RG are skipped and not copied to the target RG**. This feature was introduced to avoid RGCOPY issues caused by future resource properties.
-
->  :memo: **Note:** RGCOPY can currently only copy resource groups that have less than 200 resources. This is caused by a restriction of the Az cmdlet `Export-AzResourceGroup` which is used by RGCOPY.
-
-The following ARM resources are copied from the source RG:
+RGCOPY copies the following resources from the source RG. **All other resources in the source Resource RG are skipped and not copied to the target RG**:
 - Microsoft.Compute/virtualMachines
 - Microsoft.Compute/disks
+- Microsoft.Network/virtualNetworks
+- Microsoft.Network/networkSecurityGroups
+- Microsoft.Network/networkInterfaces
+- Microsoft.Network/publicIPAddresses
+- Microsoft.Network/publicIPPrefixes
+- Microsoft.Network/loadBalancers
+- Microsoft.Network/natGateways
 - Microsoft.Compute/availabilitySets
 - Microsoft.Compute/proximityPlacementGroups
 - Microsoft.Compute/virtualMachineScaleSets
-- Microsoft.Network/virtualNetworks
-- Microsoft.Network/virtualNetworks/subnets
-- Microsoft.Network/networkInterfaces
-- Microsoft.Network/publicIPAddresses
-- Microsoft.Network/loadBalancers **\***
-- Microsoft.Network/loadBalancers/backendAddressPools
-- Microsoft.Network/networkSecurityGroups
 - Microsoft.Network/bastionHosts
-- Microsoft.Network/natGateways
-- Microsoft.Network/publicIPPrefixes
-
-**\* RGCOPY does not support** Microsoft.Network/loadBalancers/**loadBalancerInboundNatRules** yet
 
 In the target RG, the following ARM resources might be deployed in addition:
-- Microsoft.Compute/images
-- Microsoft.Compute/virtualMachines/extensions
 - Microsoft.Storage/storageAccounts
-- Microsoft.Storage/storageAccounts/blobServices
-- Microsoft.Storage/storageAccounts/fileServices
-- Microsoft.Storage/storageAccounts/blobServices/containers
-- Microsoft.Network/virtualNetworks/virtualNetworkPeerings 
+- Microsoft.Compute/virtualMachines/extensions
 - Microsoft.NetApp/netAppAccounts
-- Microsoft.NetApp/netAppAccounts/capacityPools
-- Microsoft.NetApp/netAppAccounts/capacityPools/volumes
+- Microsoft.Compute/images
 
-**Resources must not refer to resources in other resource groups** with two exceptions:
-- VMs might use NICs from remote resource groups
-- NICs might be connected to a subnet of a remote resource group
-
-In these cases, RGCOPY creates a copy of the remote NICs, vnets and subnetsin the target RG. The resource names are changed (prefixed with 'remote-') to make sure that they are unique within the target RG.
+**Not all properties of the resources are copied**, for example
+- VM **identities** are not copied.
+- The **DNS server** property of NICs is not copied. The old DNS server would not be accessible anyway in the target RG because the virtual network in the target RG is isolated.
+- **Network peering** is not copied.
+- RGCOPY can only copy VMs that are located in the same region as the source RG.
 
 
 ### Changes in the source RG
@@ -976,12 +1110,12 @@ RGCOPY creates the following files in the user home directory (or in the directo
 
 file|*[DataType]*: usage
 :---|:---
-`rgcopy.<source_RG>.SOURCE.json`|Exported ARM template(s) from the source RG(s).
-`rgcopy.<target_RG>.TARGET.json`<BR>`rgcopy.<source_RG>.TARGET.json`|ARM template which is generated by RGCOPY<BR>*Ditto* when using **Archive Mode**
-`rgcopy.<target_RG>.TARGET.log`<BR>`rgcopy.<source_RG>.SOURCE.log`|Standard RGCOPY log file<BR>*Ditto* when using **Update Mode**
+`rgcopy.<source_RG>.SOURCE.json`|Exported template from the source RG
+`rgcopy.<target_RG>.TARGET.json`<BR>`rgcopy.<source_RG>.TARGET.json`<BR>`rgcopy.<target_RG>.TARGET.bicep`<BR>`rgcopy.<target_RG>.DISKS.bicep`|Generated template files created by RGCOPY<BR>(dependent on used RGCOPY mode)
+`rgcopy.<target_RG>.TARGET.log`<BR>`rgcopy.<source_RG>.SOURCE.log`|Standard RGCOPY log file<BR>(dependent on used RGCOPY mode)
 `rgcopy.txt`|Backup of the running script rgcopy.ps1 used for support
 `rgcopy.<source_RG>.RESTORE.ps1.txt`|Generated PowerShell script when using **Archive Mode**
-`rgcopy.<target_RG>.<time>.zip`<BR>`rgcopy.<source_RG>.<time>.zip`| Compressed ZIP file that contains all files above<BR>*Ditto*  when using **Update Mode**
+`rgcopy.<target_RG>.<time>.zip`<BR>`rgcopy.<source_RG>.<time>.zip`| Compressed ZIP file that contains all files above<BR>(dependent on used RGCOPY mode)
 `rgcopy.arm-templates.zip`|ZIP file containing ARM templates when using **Archive Mode**
 `rgcopy.<target_RG>.TEMP.json`<BR>`rgcopy.<target_RG>.TEMP.txt`| temporary files
 
@@ -1018,6 +1152,7 @@ virtual machine tag|[DataType]: usage
 :---|:---
 **`rgcopy.DeploymentOrder`**  |**[int]**: When not setting parameter `setVmDeploymentOrder`, the value of the tag is used to define the deployment order of the VM (that has the tag)
 **`rgcopy.Extension.SapMonitor`**       |**[string]**: When not setting parameter `installExtensionsSapMonitor` and setting the tag to 'true', the Azure Enhanced Monitoring Extension for SAP will be installed on the vm (that has the tag).
+**`rgcopy.VmType`**       |**[string]**: When starting s script from RGCOPY using parameters `scriptStartSapPath`, `scriptStartLoadPath` or `scriptStartAnalysisPath` then the value of this tag is contained in variable `vmType`. Hereby, the script can behave differently dependent on the VM where it has been started.
 
 The following 3 tags must contain the VM name in their value (for example, tag `rgcopy.ScriptStartSap` with value `/root/startSAP.sh@vm2`). Therefore, they can be set on any VM. However, you should not set the same tag using different values on different VMs. 
 
