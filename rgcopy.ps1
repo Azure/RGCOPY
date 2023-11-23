@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.54
-version date:     October 2023
+version:          0.9.55
+version date:     November 2023
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 Microsoft intern: https://github.com/azure-core/rg-copy/tree/development
@@ -15722,6 +15722,13 @@ function add-bicepResource {
 			# recursion level 1
 			if ($tabCount -eq 1) {
 
+				if ($key -eq 'tags') {
+					$script:verboseTags = $True
+				}
+				else {
+					$script:verboseTags = $False
+				}
+
 				switch ($key) {
 					'type' {
 						$script:verboseType = $value
@@ -15745,6 +15752,7 @@ function add-bicepResource {
 						$value = $newValue
 					}
 				}
+
 				if ($key -in @( 'if', 'type', 'apiVersion', 'resourceGroupName', 'bicepName')) {
 					continue
 				}
@@ -15791,14 +15799,23 @@ function add-bicepResource {
 					else {
 						# ARRAY item: STRING
 						if ($item -is [string]) {
+
 							# string that does not need quotes (e.g. parameter name)
 							if ($item -like '<*>') {
-								$param = $item -replace '<', '' -replace '>', ''
-								$textArray += $tabString * ($tabCount + 1) + "$param"
+								$item = test-angleBrackets $item
+								$textArray += $tabString * ($tabCount + 1) + "$item"
 							}
+							
 							# nornal string
 							else {
-								$item = $item -replace '\\', '\\' -replace '\$', '\$' -replace "'", "\'"
+								$item = $item	-replace '\\', '\\' `
+												-replace '\$', '\$' `
+												-replace "'", "\'" `
+												-replace '\r', '\r' `
+												-replace '\n', '\n' `
+												-replace '\f', '\f' `
+												-replace '\t', '\t' `
+												-replace '\v', '\v'
 								$textArray += $tabString * ($tabCount + 1) + "'$item'"
 							}
 						}
@@ -15831,13 +15848,22 @@ function add-bicepResource {
 				}
 
 				# string that does not need quotes (e.g. parameter name)
-				if ($value -like '<*>') {
-					$param = $value -replace '<', '' -replace '>', ''
-					$textArray += $tabString * $tabCount + "$key`: $param"
+				# except for tags values ($script:verboseTags -eq $True)
+				if (($value -like '<*>') -and !$script:verboseTags) {
+					$value = test-angleBrackets $value
+					$textArray += $tabString * $tabCount + "$key`: $value"
 				}
+
 				# nornal string
 				elseif ($value.length -gt 0) {
-					$value = $value -replace '\\', '\\' -replace '\$', '\$' -replace "'", "\'"
+					$value = $value	-replace '\\', '\\' `
+									-replace '\$', '\$' `
+									-replace "'", "\'" `
+									-replace '\r', '\r' `
+									-replace '\n', '\n' `
+									-replace '\f', '\f' `
+									-replace '\t', '\t' `
+									-replace '\v', '\v'
 					$textArray += $tabString * $tabCount + "$key`: '$value'"
 				}
 			}
@@ -15881,10 +15907,17 @@ function add-resourcesALL {
 		$resource.name 				= $az_res.Name
 		$resource.resourceGroupName	= $az_res.ResourceGroupName
 
-		# tags
+		# tags for most resources
 		$tags = $az_res.Tags -as [hashtable]
 		if ($tags.count -gt 0) {
 			$resource.tags = $tags
+		}
+		# tags for some resources
+		else {
+			$tags = $az_res.Tag -as [hashtable]
+			if ($tags.count -gt 0) {
+				$resource.tags = $tags
+			}
 		}
 		
 		# zones
@@ -16236,6 +16269,21 @@ function add-az_publicIPAddresses {
 }
 
 #--------------------------------------------------------------
+function test-angleBrackets {
+#--------------------------------------------------------------
+	param (
+		$string
+	)
+
+	if ($string -like '<*>') {
+		$string = $string	-replace '<', '' `
+							-replace '>', ''
+	}
+
+	return $string
+}
+
+#--------------------------------------------------------------
 function add-az_networkSecurityGroups {
 #--------------------------------------------------------------
 	foreach ($az_res in $script:az_networkSecurityGroups) {
@@ -16247,7 +16295,7 @@ function add-az_networkSecurityGroups {
 				name				= $rule.Name
 				properties			= @{
 					access						= $rule.Access -as [string]
-					description					= $rule.Description
+					description					= test-angleBrackets $rule.Description
 					# destinationApplicationSecurityGroups
 					direction					= $rule.Direction -as [string]
 					priority					= $rule.Priority
@@ -16589,13 +16637,19 @@ function add-az_loadBalancers {
 		# outboundRules
 		foreach ($rule in $az_res.OutboundRules) {
 
+			$frontendConfigs = @()
+			foreach ($frontendConfig in $rule.FrontendIPConfigurations) {
+				$frontendConfigs += get-bicepResourceFunctionById $frontendConfig.Id
+				
+			}
+
 			$obrule = @{
 				name = $rule.Name
 				properties = @{
 					allocatedOutboundPorts		= $rule.AllocatedOutboundPorts
 					backendAddressPool			= get-bicepResourceFunctionById $rule.BackendAddressPool.Id
 					enableTcpReset				= $rule.EnableTcpReset
-					frontendIPConfigurations	= get-bicepResourceFunctionById $rule.FrontendIPConfiguration.Id
+					frontendIPConfigurations	= $frontendConfigs
 					idleTimeoutInMinutes		= $rule.IdleTimeoutInMinutes
 					protocol					= $rule.Protocol
 				}

@@ -1,5 +1,11 @@
 ## Version history
 
+#### RGCOPY 0.9.55 October 2023
+type|change
+:---|:---
+bug fix|Allow copying load balancer with outbound rules
+bug fix|Allow new line `\n` as part of a string in BICEP, e.g. in security rule description
+
 #### RGCOPY 0.9.54 October 2023
 type|change
 :---|:---
