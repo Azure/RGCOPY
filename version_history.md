@@ -1,6 +1,61 @@
 ## Version history
 
-#### RGCOPY 0.9.55 October 2023
+#### RGCOPY 0.9.58 March 2024
+type|change
+:---|:---
+feature| Allow snapshot copy to a different subscription
+feature| New parameter `skipWorkarounds`
+experimental<BR>feature| New parameters `swapSnapshot4disk` and `swapDisk4disk`
+bug fix| Fix a bug that was introduced in RGCOPY 0.9.55 that did not allow to deploy TiP sessions using BICEP
+feature| New parameter `useNewVmSizes`
+
+#### RGCOPY 0.9.57 February 2024
+type|change
+:---|:---
+feature| Workarounds for open Azure issues.
+feature| New parameters `useIncSnapshots`, `createDisksManually` and `useRestAPI`
+
+#### Workarounds in RGCOPY for open Azure issues:
+**1. BLOB COPY issue (Grant-AzSnapshotAccess)**
+Grant-AzSnapshotAccess fails for disks with logical sector size 4096
+https://github.com/Azure/azure-powershell/issues/24129
+https://github.com/Azure/azure-cli/issues/28320
+*-> use REST API rather than Grant-AzSnapshotAccess*
+
+**2. SNAPSHOT COPY issue (New-AzSnapshot)**
+security type trusted launch gets lost during snapshot copy
+https://github.com/Azure/azure-powershell/issues/24242
+https://github.com/Azure/azure-cli/issues/28457
+*-> use REST API for snapshot copy when security type is set*
+
+**3. disk creation issue (ARM template)**
+security type trusted launch cannot be set when creating disks from BLOB in ARM template
+https://github.com/Azure/azure-powershell/issues/24253
+*-> create disks from BLOB outside ARM template (New-AzDisk)*
+
+**4. disk creation issue (New-AzDisk)**
+security type trusted launch cannot be set when creating disks from BLOB using New-AzDisk
+https://github.com/Azure/azure-powershell/issues/24253
+*-> use REST API for creating disk*
+
+**5. disk creation issue (New-AzDisk)**
+disk controller type NVMe cannot be set when creating disks from BLOB using New-AzDisk
+*-> use REST API for creating disk*
+
+#### RGCOPY 0.9.56 January 2024
+type|change
+:---|:---
+feature| Allow existing incremental snapshots. However, you must not create an additional incremental snapshot while RGCOPY is running. RGCOPY 0.9.56 always deletes copied incremental snapshots at the very end. This allows starting a new RGCOPY run with parameter `skipSnapshots` afterwards. 
+feature| Remove check for trusted launch on premium V2 disks. This restriction has been removed by Azure as of January 2024.
+feature|New syntax for `createVmssFlex`: <BR>- Allow using `1` instead of the synonym `none` for the fault domain count.<BR>- Allow `1` for zones. <BR>- Allow `none` for zones *and* `none` for fault domain count at the same time - although this is not a recommended configuration for SAP. We need this for testing non-SAP scenarios.
+feature|Allow creating AvSets, PPGs and VMSS without members. Just do not add an `@<vm1>, ...` to the parameter.
+experimental feature| New patch mode, that installs Linux updates.<BR>New parameters `patchMode`, `patchVMs`, `patchKernel`, `patchAll`, `prePatchCommand` and `skipStopVMsAfterPatching`
+feature|Automatically remove Availability Zone if VM was not part of an AvSet but becomes part of a new AvSet by using parameter `createAvailabilitySet`
+feature| Allow parameters `setDiskMBps` and `setDiskIOps` also for UltraSSD disks. However, parameter values are not checked for consistency.
+feature| workaround for Azure bugs:<BR>- use snapshot copy rather than BLOB copy if disk sector size is 4096 <BR>- use BLOB copy rather than snapshot copy if OS disk is configured as Trusted Launch
+feature| remove unneeded snapshot revoke for snapshot copy
+
+#### RGCOPY 0.9.55 November 2023
 type|change
 :---|:---
 bug fix|Allow copying load balancer with outbound rules

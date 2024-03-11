@@ -1,5 +1,5 @@
 # RGCOPY documentation
-**Version: 0.9.54<BR>October 2023**
+**Version: 0.9.57<BR>February 2024**
 ***
 
 ### Introduction
@@ -153,12 +153,22 @@ Step|parameter<BR>skip switch|usage
 The following table explains the needed steps for disk creation in the target RG. These steps depend if an **ultra SKU** (`UltraSSD_LRS`, `PremiumV2_LRS`) or an **usual SKU** (`Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`) is used for the disk in the source RG.
 "same az-user" means that parameters `sourceSubUser` and `targetSubUser` are identical.
 
-source SKU<BR>`RGCOPY switch`|target<ul><li>same az-user</li><li>same region</li><li>any subscription</li></ul>|target<ul><li>same az-user</li><li>different region</li></ul><BR>|target<ul><li>different az-user</li></ul><BR><BR>
-:---|:---|:---|:---
-usual SKU|- full snapshot|- full snapshot<BR>- create **BLOB** in target|- full snapshot<BR>- create **BLOB** in target
-ultra SKU|- incremental snapshot|- incremental snapshot<BR>- create **BLOB** in target|- incremental snapshot<BR>- create **BLOB** in target
-any SKU<BR>`useBlobs`|- full / incremental snapshot<BR>- create **BLOB** in target|- full / incremental snapshot<BR>- create **BLOB** in target|- full / incremental snapshot<BR>- create **BLOB** in target
-any SKU<BR>`useSnapshotCopy`|- incremental snapshot<BR>- copy **snapshot** to target|- incremental snapshot<BR>- copy **snapshot** to target|- incremental snapshot<BR>- create **BLOB** in target
+x|target RG<ul><li>same az-user</li><li>and same region</li></ul>|target RG<ul><li>other az-user</li><li>or different region</li></ul>
+:---|:---|:---
+**source RG<BR><ul><li>usual SKU**</li></ul>|- full snapshot<BR><BR>- create disk from snapshot|- full snapshot<BR>- create BLOB in target<BR>- create disk from BLOB
+**source RG<BR><ul><li>ultra SKU**</li></ul>|- incremental snapshot<BR><BR>- create disk from snapshot|- incremental snapshot<BR>- create BLOB in target<BR>- create disk from BLOB
+
+Dependent on the snapshot type (full or incremental) and other constraints, disks are created either using the main ARM/BICEP template, a separate ARM/BICEP template, or manually using `New-AzDisk` or an REST-API call.
+
+You can further change the behavior by setting the following parameters:
+
+ parameter|[DataType]: usage
+:---|:---
+**`useBlobs`** |**[switch]**: Always use BLOB copy (even when source RG and target RG are in the same region)
+**`useSnapshotCopy`** |**[switch]**: Always use snapshot copy rather than BLOB copy whenever possible (same az-user must be used for source RG and target RG)
+**`useIncSnapshots`** |**[switch]**: Always use incremental snapshots rather than full snapshots
+**`createDisksManually`** |**[switch]**: Do not use an ARM- or BICEP-template for creating disks (use `New-AzDisk` or a REST-API call instead)
+**`useRestAPI`** |**[switch]**: Always Use REST-API calls instead of using `Grant-AzSnapshotAccess`, `New-AzDisk` and `New-AzSnapshot` (for snapshot copy)
 
  > :memo: **Note:** An ultra SKU can use a logical sector size of either 512 byte or 4 KB. A disk that is using an ultra SKU with a **locical sector size of 512 byte** can be converted to any SKU. However, a disk is that using an ultra SKU with 4 KB locical sector size can only be converted to an ultra SKU.
 
@@ -346,10 +356,10 @@ parameter|[DataType]: usage
 **`skipVmssFlex`**|**[switch]**: do not copy existing VM Scale Sets Flexible. <BR>Hereby, the target RG does not contain any VM Scale Set.
 **`skipAvailabilitySet`**|**[switch]**: do not copy existing Availability Sets. <BR>Hereby, the target RG does not contain any Availability Set.
 **`skipProximityPlacementGroup`**|**[switch]**: do not copy existing Proximity Placement Groups. <BR>Hereby, the target RG does not contain any Proximity Placement Group.
-**`createVmssFlex`** = <BR>`@("vmss/fault/zones@vm1,vm2,...", ...)`			|Create a VMSS Flex (VM Scale Set with Flexible orchestration mode) for given VMs: <ul><li>**vmss**: VM Scale Set Name </li><li>**fault**: Fault domain count in {none, 2, 3, max}.<BR>For SAP, fault domain count must always be `none`.</li><li>**zones** Allowed Zones in {none, 1+2, 1+3, 2+3, 1+2+3}  </li><li>**vm**: VM name </li></ul>:memo: **Note:** When you are using this parameter for creating new VM Scale Sets then all existing VM Scale Sets are removed first.<BR>:warning: **Warning:** Either *zones* or *fault* must have the value `none`.<BR>For SAP, *fault* must have the value `none`.<BR>:bulb: **Tip:** A fault domain count of *max* automatically creates the maximum number of fault domains in the target region.
+**`createVmssFlex`** = <BR>`@("vmss/fault/zones@vm1,vm2,...", ...)`			|Create a VMSS Flex (VM Scale Set with Flexible orchestration mode) for given VMs: <ul><li>**vmss**: VM Scale Set Name </li><li>**fault**: Fault domain count in {`none`, `1`, `2`, `3`, `max`}.<BR>`none` is a synonym for `1`. `max` is a synonym for the maximum number of fault domains in the target region</li><li>**zones** Allowed Zones in {`none`, `1`, `2`, `3`, `1+2`, `1+3`, `2+3`, `1+2+3`}  </li><li>**vm**: VM name </li></ul>:memo: **Note:** When you are using this parameter for creating new VM Scale Sets then all existing VM Scale Sets are removed first.<BR>:memo: **Note:** for zonal deployment, *fault* must have the value `1` (or `none`)<BR>:warning: **Warning:** For SAP, we recommend zonal deployment (and therefore, *fault* must have the value `1` or `none`).<BR>:memo: **Note:** When not specifying any VM then this configuration is *not* valid for all VMs. Instead, a VMSS flex is created without any member.
 **`singlePlacementGroup`**|Set property `singlePlacementGroup` for all VMSS Flex.<BR>Allowed values in {`$Null`, `$True`, `$False`}<BR>Setting this parameter is normally not needed.
-**`createAvailabilitySet`** = <BR>`@("avset/fault/update@vm1,vm2,...", ...)`			|Create Azure Availability Set for given VMs:<ul><li>**avset**: Availability Set Name </li><li>**fault**: Fault domain count</li><li>**update**: Update domain count</li><li>**vm**: VM name </li></ul>:memo: **Note:** When you are using this parameter for creating new Availability Sets then all existing Availability Sets *and* Proximity Placement Groups are removed first.
-**`createProximityPlacementGroup`** = <BR>`@("ppg@res1,res2,...", ...)`			|Create Azure Proximity Placement Group for given resources: <ul><li>**ppg**: Proximity Placement Group Name </li><li>**res**: resource name (either VM, Availability Set or VMSS Flex) </li></ul>:memo: **Note:** When you are using this parameter for creating new Proximity Placement Groups then all existing Proximity Placement Groups *and* Availability Sets are removed first.<BR>:warning: **Warning:** You might use the same name for a VM and an Availability Set and add this name as resource name to this parameter. In this case, the VM as well as the Availability Set will be added to the Proximity Placement Group.
+**`createAvailabilitySet`** = <BR>`@("avset/fault/update@vm1,vm2,...", ...)`			|Create Azure Availability Set for given VMs:<ul><li>**avset**: Availability Set Name </li><li>**fault**: Fault domain count</li><li>**update**: Update domain count</li><li>**vm**: VM name </li></ul>:memo: **Note:** When you are using this parameter for creating new Availability Sets then all existing Availability Sets *and* Proximity Placement Groups are removed first.<BR>:memo: **Note:** When not specifying any VM then this configuration is *not* valid for all VMs. Instead, an AvSet is created without any member.
+**`createProximityPlacementGroup`** = <BR>`@("ppg@res1,res2,...", ...)`			|Create Azure Proximity Placement Group for given resources: <ul><li>**ppg**: Proximity Placement Group Name </li><li>**res**: resource name (either VM, Availability Set or VMSS Flex) </li></ul>:memo: **Note:** When you are using this parameter for creating new Proximity Placement Groups then all existing Proximity Placement Groups *and* Availability Sets are removed first.<BR>:warning: **Warning:** You might use the same name for a VM and an Availability Set and add this name as resource name to this parameter. In this case, the VM as well as the Availability Set will be added to the Proximity Placement Group.<BR>:memo: **Note:** When not specifying any resource then this configuration is *not* valid for all VMs. Instead, a PPG is created without any member.
 
 In Azure you cannot directly configure the Availability Zone for an Availability Set. However, you can indirectly pin an Availability Set to an Availability Zone. The trick is to deploy an additional VM that is in the Availability Zone. If this VM and the Availability Set are in the same Proximity Placement Group then they are also in the same Availability Zone. However, this only works if the VM is deployed first. If you deploy the Availability Set first then it might be deployed in a different Availability Zone. Afterwards, the deployment of the VM fails because the requirements for Availability Zone and Proximity Placement Group cannot be fulfilled at the same time. Luckily, you can define the deployment order in RGCOPY:
 
