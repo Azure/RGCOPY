@@ -1,4 +1,31 @@
 ## Version history
+#### RGCOPY 0.9.63 Mai 2024
+type|change
+:---|:---
+feature|Never allow shared key access for storage accounts.<BR>You should use snapshot copy rather than BLOB copy if RGCOPY has only the `Subscription Contributor` role in the target subscription.
+bug fix|Stop all VMs after creating snapshots once parameter `pathPreSnapshotScript` had been set.
+feature|Change file copy for NetApp volumes: Use NFS with private endpoint rather than SMB with storage account keys. Remove parameter `smbTier`. New parameter `nfsQuotaGiB`
+
+#### RGCOPY 0.9.62 April 2024
+type|change
+:---|:---
+feature| Hardening storage accounts:<ul><li>Do not allow shared key access by default. Instead, RGCOPY is trying to assign the role `Storage Blob Data Owner` to the user or managed identity that is running RGCOPY. However, the RGCOPY user often has the `Subscription Contributor` role. This role is not sufficient to assign the `Storage Blob Data Owner` role. In this case, RGCOPY still uses shared key access for the lifetime of the storage account. This is more secure than expanding the privileges for all RGCOPY users.</li><li>Delete the storage account in target RG by default as soon as it is not needed anymore (at the end of RGCOPY)</li></ul>.
+
+#### RGCOPY 0.9.61 April 2024
+type|change
+:---|:---
+feature| Allow deploying a ZRS disk for a zonal VM.
+
+#### RGCOPY 0.9.60 April 2024
+type|change
+:---|:---
+feature| Copy user assigned managed identities by default. New parameter `skipIdentities`
+
+#### RGCOPY 0.9.59 April 2024
+type|change
+:---|:---
+feature| Using Get-AzAccessToken instead of .NET API AcquireAccessToken, as recommended by Azure DEV.
+feature| Always install VM extensions `AzureMonitor*Agent`(except when parameter `skipExtensions` is set). Remove parameter `installExtensionsAzureMonitor`. New parameter `autoUpgradeExtensions`.
 
 #### RGCOPY 0.9.58 March 2024
 type|change
@@ -40,6 +67,7 @@ https://github.com/Azure/azure-powershell/issues/24253
 
 **5. disk creation issue (New-AzDisk)**
 disk controller type NVMe cannot be set when creating disks from BLOB using New-AzDisk
+https://github.com/Azure/azure-powershell/issues/24347
 *-> use REST API for creating disk*
 
 #### RGCOPY 0.9.56 January 2024
