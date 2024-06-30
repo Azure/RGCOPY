@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.63
-version date:     May 2024
+version:          0.9.64
+version date:     June 2024
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 
@@ -55,7 +55,6 @@ param (
 	,[switch] $skipSnapshots								# skip snapshot creation of disks and volumes (in sourceRG)
 	,[switch]   $stopVMsSourceRG 							# stop VMs in the source RG before creating snapshots
 	,[switch] $skipBackups									# skip backup of files (in sourceRG)
-	,[switch] $skipBlobs									# skip BLOB creation (in targetRG)
 	,[switch] $skipDeployment								# skip deployment (in targetRG)
 	,[switch]   $skipDeploymentVMs							# skip part step: deploy Virtual Machines
 	,[switch]   $skipRestore								# skip part step: restore files
@@ -79,16 +78,26 @@ param (
 	,[string] $diagSettingsSA
 
 	# disk creation options
-	,[switch] $skipWorkarounds
-	,[switch] $useIncSnapshots
 	,[switch] $createDisksManually
-	,[switch] $useRestAPI
-	,[switch] $useSnapshotCopy
-	,[switch] $useBlobs										# always (even in same region) copy snapshots to BLOB
-	# only if $skipBlobs -eq $True:
+	,[switch] $dualDeployment
+	,[switch] $skipWorkarounds
+	,[switch] $useIncSnapshots								# always use INCREMENTAL rather than FULL snapshots (even in same region and for standard disks)
+	,[switch] $useRestAPI									# always use REST API rather than az-cmdlets when possible
+
+	,[switch] $useSnapshotCopy								# always use SNAPSHOT copy (even in same region)
+	,[switch] $useBlobCopy									# always use BLOB copy (even in same region)
+	,[switch] $skipRemoteCopy								# skip BLOB/snapshot creation (in targetRG)
+	,[switch] $restartRemoteCopy							# restart a failed BLOB Copy
+
 	,[string] $blobsSA										# Storage Account of BLOBs
 	,[string] $blobsRG										# Resource Group of BLOBs
 	,[string] $blobsSaContainer								# Container of BLOBs
+
+	# parameters for cleaning an incomplete RGCOPY run
+	,[array]  $justCopyBlobs 				# only copy these disks to BLOBs (from existing snapshots)
+	,[array]  $justCopySnapshots 			# only copy these disks to SNAPSHOTs (from existing snapshots)
+	,[array]  $justCopyDisks				# only copy these disks (by creating snapshots and disks)
+	,[switch] $justStopCopyBlobs
 
 	#--------------------------------------------------------------
 	# parameters for Archive Mode
@@ -199,8 +208,6 @@ param (
 	# default values
 	#--------------------------------------------------------------	
 	,[int] $grantTokenTimeSec		= 3 * 24 * 60 * 60		# grant access to source disks for 3 days
-	,[int] $testDelayCreation		= 2
-	,[int] $testDelayCopy			= 10
 	,[int] $vmStartWaitSec			= 5 * 60				# wait time after VM start before using the VMs (before trying to run any script)
 	,[int] $preSnapshotWaitSec		= 5 * 60				# wait time after running pre-snapshot script
 	,[int] $vmAgentWaitMinutes		= 30					# maximum wait time until VM Agent is ready
@@ -368,26 +375,18 @@ param (
 	,[switch] $renameDisks	# rename all disks using their VM name
 
 	#--------------------------------------------------------------
-	# parameters for cleaning an incomplete RGCOPY run
-	#--------------------------------------------------------------
-	,[switch] $restartBlobs					# restart a failed BLOB Copy
-	,[array]  $justCopyBlobs 				# only copy these disks to BLOBs (from existing snapshots)
-	,[array]  $justCopyDisks				# only copy these disks (by creating snapshots and disks)
-	,[switch] $justStopCopyBlobs
-	# use Parameter Set singleRG when switch justCreateSnapshots is set
-	,[Parameter(ParameterSetName='singleRG')]
-	 [switch] $justCreateSnapshots
-	# use Parameter Set singleRG when switch justDeleteSnapshots is set
-	,[Parameter(ParameterSetName='singleRG')]
-	 [switch] $justDeleteSnapshots
-	,$defaultDiskZone
-	,$defaultDiskName
-
-	#--------------------------------------------------------------
 	# other parameter
 	#--------------------------------------------------------------
 	,[switch] $ultraSSDEnabled # create VM with property ultraSSDEnabled even when not needed
 	,[boolean] $useBicep	= $True
+	# use Parameter Set singleRG when switch justCreateSnapshots is set
+	,[Parameter(ParameterSetName='singleRG')]
+	[switch] $justCreateSnapshots
+	# use Parameter Set singleRG when switch justDeleteSnapshots is set
+	,[Parameter(ParameterSetName='singleRG')]
+	[switch] $justDeleteSnapshots
+	,$defaultDiskZone
+	,$defaultDiskName
 
 	#--------------------------------------------------------------
 	# experimental parameters: DO NOT USE!
@@ -469,7 +468,7 @@ $workflowParameters = @(
 	'skipSnapshots'
 	'stopVMsSourceRG'
 	'skipBackups'
-	'skipBlobs'
+	'skipRemoteCopy'
 	'skipDeployment'
 	'skipDeploymentVMs'
 	'skipRestore'
@@ -480,10 +479,10 @@ $workflowParameters = @(
 	'stopVMsTargetRG'
 	'deleteSnapshots'
 	'deleteSourceSA'
-	'deleteTargetSA'
 	'simulate'
-	'restartBlobs'
+	'restartRemoteCopy'
 	'justCopyBlobs'
+	'justCopySnapshots'
 	'justCopyDisks'
 	'justStopCopyBlobs'
 	'justCreateSnapshots'
@@ -2974,15 +2973,17 @@ function show-quota {
 #--------------------------------------------------------------
 function assert-vmsStopped {
 #--------------------------------------------------------------
-	if ($stopVMsSourceRG) {
+	if ($stopVMsSourceRG `
+	-or $allowRunningVMs `
+	-or $skipSnapshots `
+	-or ($justCopyBlobs.count -ne 0) `
+	-or ($justCopySnapshots.count -ne 0)) {
+	
 		return
 	}
 
 	# check for running VM with more than one data disk or volume
-	if ( !$allowRunningVMs `
-	-and !$skipSnapshots `
-	-and ($pathPreSnapshotScript.length -eq 0) `
-	-and $script:VMsRunning ) {
+	if ($script:VMsRunning -and ($pathPreSnapshotScript.length -eq 0)) {
 		write-logFileWarning "Trying to copy non-deallocated VM with more than one data disk or volume" `
 							"Asynchronous snapshots could result in data corruption in the target VM" `
 							"Stop these VMs manually or use RGCOPY switch 'stopVMsSourceRG' for stopping ALL VMs" `
@@ -2993,8 +2994,7 @@ function assert-vmsStopped {
 	$script:copyVMs.Values
 	| ForEach-Object {
 
-		if ( (!$allowRunningVMs -and !$skipSnapshots) `
-		-and ($pathPreSnapshotScript -eq 0) `
+		if (($pathPreSnapshotScript -eq 0) `
 		-and ($_.VmStatus -ne 'VM deallocated') `
 		-and ($_.hasWA -eq $True)) {
 
@@ -3027,6 +3027,7 @@ function show-snapshots {
 		$requiredSnapshots += $_.SnapshotName
 	}
 
+	# show all reqired snapshots
 	$script:sourceSnapshots
 	| Where-Object Name -in $requiredSnapshots
 	| Sort-Object TimeCreated
@@ -3043,7 +3044,7 @@ function show-snapshots {
 	| write-LogFilePipe
 
 
-	if ('skipSnapshots' -in $boundParameterNames) {		
+	if ($skipSnapshots) {		
 		$script:copyDisks.values
 		| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) }
 		| ForEach-Object {
@@ -3562,51 +3563,64 @@ function save-copyDisks {
 		$logicalSectorSize	= $disk.CreationData.LogicalSectorSize
 		$securityType		= $disk.SecurityProfile.SecurityType -as [string]
 
-		$incrementalSnapshots	= $False
-		$snapshotCopy 			= $False
-		$blobCopy 				= $False
-		
-		# incremental snapshots
-		if ($useIncSnapshots -or ($sku -in @('UltraSSD_LRS', 'PremiumV2_LRS'))) {
-			$incrementalSnapshots = $True
+		#--------------------------------------------------------------
+		# copy mode
+		if ($useBlobCopy) {
+			# blob copy explicitly requested (only possible for OSS version of RGCOPY)
+			$blobCopy 				= $True
+			$snapshotCopy 			= $False
+		}
+		elseif ($useSnapshotCopy) {
+			# snapshot copy explicitly requested
+			$snapshotCopy 			= $True
+			$blobCopy 				= $False
+		}
+		elseif ($sourceLocation -ne $targetLocation) {
+			# snapshot copy is default for copying into different region
+			$snapshotCopy 			= $True
+			$blobCopy 				= $False
+		}
+		else {
+			# default
+			$snapshotCopy 			= $False
+			$blobCopy 				= $False	
+		}
 
-			# different user
-			if ($useBlobs `
-			-or ($sourceSubUser -ne $targetSubUser) `
-			-or ($sourceSubTenant -ne $targetSubTenant)) {
+		# different user or tenant
+		if (($sourceSubUser   -ne $targetSubUser) `
+		-or ($sourceSubTenant -ne $targetSubTenant)) {
 
-				$blobCopy = $True
-			}
-
-			# different region
-			elseif ($sourceLocation -ne $targetLocation) {
-
-				if ($useSnapshotCopy) {
-					$snapshotCopy = $True
-				}
-				else {
-					# use BLOB copy by default because SNAPSHOT copy does not allow using parameter skipSnapshots
-					$blobCopy = $True
-				}	
-			}
-
-			# same region
-			elseif ($useSnapshotCopy) {
-				$snapshotCopy = $True
+			# only possible for OSS version of RGCOPY
+			if (!$msInternalVersion) {
+				$blobCopy 			= $True
+				$snapshotCopy 		= $False
 			}
 		}
 
-		# full snapshots
-		else {
-		
-			# different location or user
-			if (($sourceLocation -ne $targetLocation) `
-			-or $useBlobs `
-			-or ($sourceSubUser -ne $targetSubUser) `
-			-or ($sourceSubTenant -ne $targetSubTenant)) {
+		# BLOB copy does not work for BLOBs larger than 4TiB using Start-AzStorageBlobCopy
+		if (!$skipWorkarounds) {
+			if ($blobCopy -and ($disk.DiskSizeGB -gt 4096)) {
 
-				$blobCopy = $True
+				$blobCopy			= $False
+				$snapshotCopy 		= $True
+
+				if (!$messageShown) {
+					$messageShown = $True
+					write-logFileWarning "Using SNAPSHOT copy rather than BLOB copy for disks larger than 4TiB"
+				}
 			}
+		}
+
+		#--------------------------------------------------------------
+		# snapshot mode
+		if ($useIncSnapshots `
+		-or $snapshotCopy `
+		-or ($sku -in @('UltraSSD_LRS', 'PremiumV2_LRS'))) { `
+
+			$incrementalSnapshots	= $True
+		}
+		else {
+			$incrementalSnapshots	= $False
 		}
 
 		# workaraound for Azure bugs:
@@ -3664,7 +3678,6 @@ function save-copyDisks {
 		# -> use REST API for creating disk
 		# implemented in function new-disks
 
-		
 		# get bursting
 		$burstingEnabled = $disk.BurstingEnabled
 		if ($Null -eq $burstingEnabled) {
@@ -4252,7 +4265,6 @@ function get-sourceVMs {
 #--------------------------------------------------------------
 function get-DiskCreationMethod {
 #--------------------------------------------------------------
-	$script:dualDeployment		= $False
 	$script:snapshotCopyNeeded	= $False
 	$script:blobCopyNeeded		= $False
 
@@ -4260,23 +4272,27 @@ function get-DiskCreationMethod {
 	| Where-Object Skip -ne $True
 	| ForEach-Object {
 
-		# wait for incremental snapshot completion required?
-		# This should not be neccesary anymore in the future
-		if (!$skipWorkarounds) {
+		# # wait for incremental snapshot completion required?
+		# # This should not be neccesary anymore in the future
+		# if (!$skipWorkarounds) {
 
-			# Dual deployment needed?
-			if ($_.incrementalSnapshots -and !$script:createDisksManually) {
+		# 	# Dual deployment needed?
+		# 	if ($_.incrementalSnapshots -and !$script:createDisksManually) {
 
-				$script:dualDeployment = $True
-				# useBicep set?
-				if (!$script:useBicep) {
-					write-logFileWarning "Parameter 'useBicep' has been set to `$True" `
-										"because disks have to be created in a separate template" `
-										"(disk '$($_.Name)' with SKU '$($_.SkuName)' needs incremental snapshots)"
+		# 		$script:dualDeployment = $True
+		# 		# useBicep set?
+		# 		if (!$script:useBicep) {
+		# 			write-logFileWarning "Parameter 'useBicep' has been set to `$True" `
+		# 								"because disks have to be created in a separate template" `
+		# 								"(disk '$($_.Name)' with SKU '$($_.SkuName)' needs incremental snapshots)"
 	
-					$script:useBicep = $True
-				}
-			}
+		# 			$script:useBicep = $True
+		# 		}
+		# 	}
+		# }
+
+		if ($dualDeployment) {
+			$script:useBicep = $True
 		}
 
 		# snapshot copy needed?
@@ -5034,7 +5050,7 @@ function update-paramGeneralizedVMs {
 	}
 
 	# Generalized only allowed with snapshots
-	if ($useBlobs -and ($generalizedVMs.Count -ne 0)) {
+	if (($sourceLocation -ne $targetLocation) -and ($generalizedVMs.Count -ne 0)) {
 		write-logFileError "Invalid parameter 'generalizedVMs'" `
 							"Generalized VMs can only be created in the same region" `
 							"Using BLOB copy is not allowed"
@@ -5140,8 +5156,9 @@ function update-paramSkipDisks {
 		if (($detachedDisks.count -ne 0) `
 		-and !$cloneOrMergeMode `
 		-and !$patchMode `
-		-and ($justCopyDisks.count -eq 0) `
-		-and ($justCopyBlobs.count -eq 0) ) {
+		-and ($justCopyBlobs.count -eq 0) `
+		-and ($justCopySnapshots.count -eq 0) `
+		-and ($justCopyDisks.count -eq 0) ) {
 
 			write-logFileWarning "Some disks are not attached to any VM" `
 								"These disks are not copied to the target RG" `
@@ -5157,9 +5174,12 @@ function update-paramSkipDisks {
 		}
 	}
 
-	# skip disks when justCopyBlobs is set (when BLOB copy originally failed only for a few VMs)
+	# skip disks (when remote copy originally failed only for a few VMs)
 	if ($justCopyBlobs.count -ne 0) {
 		$copySingleDisks = $justCopyBlobs
+	}
+	elseif ($justCopySnapshots.count -ne 0) {
+		$copySingleDisks = $justCopySnapshots
 	}
 	elseif ($justCopyDisks.count -ne 0) {
 		$copySingleDisks = $justCopyDisks
@@ -5202,7 +5222,7 @@ function update-paramSkipDisks {
 			# unskip configured disks
 			foreach ($diskName in $copySingleDisks) {
 				if ($Null -eq $script:copyDisks[$diskName]) {
-					write-logFileError "Invalid parameter 'justCopyBlobs' or 'justCopyDisks'" `
+					write-logFileError "Invalid parameter 'justCopyBlobs', 'justCopySnapshots' or 'justCopyDisks'" `
 										"Disk '$diskName' not found"
 				}
 				$script:copyDisks[$diskName].Skip = $False
@@ -6552,20 +6572,26 @@ function new-snapshots {
 		write-logFile
 
 		if (!$(wait-completion "INCREMENTAL SNAPSHOTS" `
-					'snapshots' $sourceRG $snapshotWaitCreationMinutes $testDelayCreation)) {
+					'snapshots' $sourceRG $snapshotWaitCreationMinutes)) {
 
 			write-logFileError "Incremental Snapshot completion did not finish within $snapshotWaitCreationMinutes minutes"
 		}
 	}
+}
 
-	#--------------------------------------------------------------
-	# calculate total size of created snapshots
-	$script:copyDisks.Values
-	| Where-Object Skip -ne $True
-	| ForEach-Object {
+#--------------------------------------------------------------
+function wait-CopySnapshots {
+#--------------------------------------------------------------
+	$savedSub = $script:currentSub
+	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
 
-		$script:totalSnapshotSize += $_.SizeGB
-	}
+
+	if (!$(wait-completion "SNAPSHOT COPY" `
+		'snapshots' $targetRG $snapshotWaitCopyMinutes)) {
+		write-logFileError "Incremental Snapshot completion did not finish within $snapshotWaitCopyMinutes minutes"
+		}
+
+	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
 }
 
 #--------------------------------------------------------------
@@ -6664,6 +6690,7 @@ function copy-snapshots {
 				Invoke-WebRequest @invokeParam | Out-Null
 			}
 			catch {
+				$error
 				throw "'$SnapshotName' snapshot copy failed"
 			}
 		}
@@ -6688,6 +6715,7 @@ function copy-snapshots {
 
 			$conf = New-AzSnapshotConfig @param
 			if (!$?) {
+				$error
 				throw "'$SnapshotName' snapshot copy failed"
 			}
 
@@ -6723,13 +6751,24 @@ function copy-snapshots {
 	}
 
 	write-stepEnd
+	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
+}
 
-	if (!$(wait-completion "SNAPSHOT COPY" `
-				'snapshots' $targetRG $snapshotWaitCopyMinutes $testDelayCopy)) {
-		write-logFileError "Incremental Snapshot completion did not finish within $snapshotWaitCopyMinutes minutes"
+#--------------------------------------------------------------
+$script:waitCount = 0
+$script:waitArray = 1,1,1,1,1,1,1,1,1,1, 2,2,2,2,2,2,2, 3,3,3,3,3,3, 4,4,4,4,4, 5,5,5,5, 6,6,6, 7,8,9
+#--------------------------------------------------------------
+function get-waitTime {
+#--------------------------------------------------------------
+	if ($script:waitCount -ge $script:waitArray.count) {
+		$waitTime = 10
+	}
+	else {
+		$waitTime = $script:waitArray[$script:waitCount]
 	}
 
-	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
+	$script:waitCount++
+	return $waitTime
 }
 
 #--------------------------------------------------------------
@@ -6739,11 +6778,12 @@ function wait-completion {
 		$step,
 		$type,
 		$resourceGroup,
-		$waitMinutes,
-		$delayMinutes = 1
+		$waitMinutes
 	)
 
-	write-stepStart "CHECK $step COMPLETION EVERY $delayMinutes MINUTE(S)"
+	$script:waitCount = 0
+
+	write-stepStart "CHECK $step COMPLETION"
 	$count = 0
 
 	do {
@@ -6774,27 +6814,30 @@ function wait-completion {
 		write-logFile (Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz')
 		$percentAll = 100
 		foreach ($item in $res) {
-			$percent = 100
-			if ($Null -ne $item.CompletionPercent) {
-				$percent = $item.CompletionPercent
-				if ($percentALL -gt $percent) {
-					$percentALL = $percent
+			if (($type -ne 'snapshots') -or ($item.Incremental -eq $True)) {
+				$percent = 100
+				if ($Null -ne $item.CompletionPercent) {
+					$percent = $item.CompletionPercent
+					if ($percentALL -gt $percent) {
+						$percentALL = $percent
+					}
 				}
-			}
-
-			$padPercent = $(' ' * 3) + $percent
-			$padPercent = $padPercent.SubString($padPercent.length - 3, 3)
-
-			if ($percent -eq 100) {
-				write-logFile "$padPercent`% $($item.Name)" -ForegroundColor 'Green'
-			}
-			else {
-				write-logFile "$padPercent`% $($item.Name)" -ForegroundColor 'DarkYellow'
+	
+				$padPercent = $(' ' * 3) + $percent
+				$padPercent = $padPercent.SubString($padPercent.length - 3, 3)
+	
+				if ($percent -eq 100) {
+					write-logFile "$padPercent`% $($item.Name)" -ForegroundColor 'Green'
+				}
+				else {
+					write-logFile "$padPercent`% $($item.Name)" -ForegroundColor 'DarkYellow'
+				}
 			}
 		}
 		write-logFile
 
 		if ($percentAll -lt 100) {
+			$delayMinutes = get-waitTime
 			Start-Sleep -seconds (60 * $delayMinutes)
 			$count += $delayMinutes
 		}
@@ -6849,12 +6892,7 @@ function remove-snapshots {
 	if (!$?) {
 		write-logFileWarning "Deletion of snapshots failed in resource group '$resourceGroup'"
 	}
-	elseif ($resourceGroup -eq $sourceRG) {
-		$script:totalSnapshotSize = 0
-	}
-	else {
-		$script:totalSnapshotSizeTarget = 0
-	}
+
 	write-stepEnd
 }
 
@@ -7035,7 +7073,7 @@ function revoke-access {
 	catch {
 		write-logFileError "Revoke-AzSnapshotAccess failed" `
 							"If Azure credentials have expired then run Connect-AzAccount" `
-							"and restart RGCOPY with ADDITIONAL parameter 'restartBlobs'" `
+							"and restart RGCOPY with ADDITIONAL parameter 'restartRemoteCopy'" `
 							-lastError
 	}
 	write-stepEnd
@@ -7057,17 +7095,22 @@ function start-copyBlobs {
 								-UseConnectedAccount `
 								-ErrorAction 'SilentlyContinue'
 
-		Start-AzStorageBlobCopy `
-			-DestContainer    $targetSaContainer `
-			-DestContext      $destinationContext `
-			-DestBlob         "$($_.Name).vhd" `
-			-AbsoluteUri      $_.AbsoluteUri `
-			-Force `
-			-WarningAction 'SilentlyContinue' `
-			-ErrorAction 'Stop' | Out-Null
+		$param = @{
+			DestContainer	= $targetSaContainer
+			DestContext     = $destinationContext
+			DestBlob        = "$($_.Name).vhd"
+			AbsoluteUri     = $_.AbsoluteUri
+			Force			= $True
+			WarningAction	= 'SilentlyContinue'
+			ErrorAction		= 'Stop' 
+		}
+		
+		Start-AzStorageBlobCopy @param | Out-Null
 		# StandardBlobTier = 'Cool' cannot be set to PageBlob
-		if (!$?) {throw "Creation of Storage Account BLOB $($_.Name).vhd failed"}
-
+		if (!$?) {
+			Write-Host $param
+			throw "Creation of Storage Account BLOB $($_.Name).vhd failed"
+		}
 		Write-Output "$($_.Name).vhd"
 	}
 
@@ -7097,7 +7140,8 @@ function stop-copyBlobs {
 
 	# parallel running script
 	$script = {
-		Write-Output "... stopping BLOB copy $($_.Name).vhd"
+		$diskname = $_.Name
+		Write-Output "... stopping BLOB copy $diskname.vhd"
 		try {
 			$destinationContext = New-AzStorageContext `
 									-StorageAccountName   $targetSA `
@@ -7107,14 +7151,16 @@ function stop-copyBlobs {
 			Stop-AzStorageBlobCopy `
 				-Container    $targetSaContainer `
 				-Context      $destinationContext `
-				-Blob         "$($_.Name).vhd" `
+				-Blob         "$diskname.vhd" `
 				-Force `
 				-WarningAction 'SilentlyContinue' `
 				-ErrorAction 'Stop' | Out-Null
-		}
-		catch [Microsoft.Azure.Storage.StorageException] { <# There is currently no pending copy operation #> }
 
-		Write-Output "$($_.Name).vhd"
+			Write-Output "$diskname.vhd"
+		}
+		catch  { 
+			Write-Output "FAILED: $diskname.vhd"
+		}
 	}
 
 	# start execution
@@ -7137,7 +7183,7 @@ function stop-copyBlobs {
 #--------------------------------------------------------------
 function wait-copyBlobs {
 #--------------------------------------------------------------
-	write-stepStart "CHECK BLOB COPY COMPLETION EVERY $testDelayCopy MINUTE(S)" -skipLF
+	write-stepStart "CHECK BLOB COPY COMPLETION" -skipLF
 	
 	$destinationContext = New-AzStorageContext `
 		-StorageAccountName   $targetSA `
@@ -7160,6 +7206,7 @@ function wait-copyBlobs {
 		}
 	}
 
+	$script:waitCount = 0
 	do {
 		Write-logFile
 		write-logFile (Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz')
@@ -7182,13 +7229,12 @@ function wait-copyBlobs {
 				catch {
 					write-logFileError "Get-AzStorageBlob failed" `
 										"If Azure credentials have expired then run Connect-AzAccount" `
-										"and restart RGCOPY with ADDITIONAL parameter 'restartBlobs'" `
+										"and restart RGCOPY with ADDITIONAL parameter 'restartRemoteCopy'" `
 										-lastError
 				}
 
-				[int] $GB_copied = $state.BytesCopied / 1024 / 1024 / 1024
 				[int] $GB_total  = $state.TotalBytes  / 1024 / 1024 / 1024
-				[int] $percent   = $GB_copied * 100 / $GB_total
+				[int] $percent   = $state.BytesCopied / $state.TotalBytes * 100
 				if (($percent -eq 100) -and ($state.BytesCopied -ne $state.TotalBytes)) { $percent = 99 }
 
 				$padPercent = $(' ' * 3) + $percent
@@ -7213,7 +7259,10 @@ function wait-copyBlobs {
 			}
 		}
 
-		if (!$done) { Start-Sleep -seconds (60 * $testDelayCopy) }
+		if (!$done) { 
+			$delayMinutes = get-waitTime
+			Start-Sleep -seconds (60 * $delayMinutes)
+		}
 	} while (!$done)
 	write-stepEnd
 }
@@ -7507,7 +7556,7 @@ function new-disks {
 	if ($script:dualDeployment) {
 
 		if (!$(wait-completion "DISK CREATION" `
-					'disks' $targetRG $snapshotWaitCreationMinutes $testDelayCreation)) {
+					'disks' $targetRG $snapshotWaitCreationMinutes)) {
 
 			write-logFileError "Disk creation completion did not finish within $snapshotWaitCreationMinutes minutes"
 		}
@@ -13082,17 +13131,19 @@ function remove-storageAccount {
 		-Name 				$mySA `
 		-ErrorAction 'SilentlyContinue' | Out-Null
 	if (!$?) {
+		# storage account does not exist -> nothing to do
 		write-logFile
 		return
 	}
 
+	# remove existing storage account
 	Remove-AzStorageAccount `
 		-ResourceGroupName	$myRG `
 		-AccountName		$mySA `
 		-Force
 	test-cmdlet 'Remove-AzStorageAccount'  "Could not delete storage account $mySA"
 
-	write-logFile "Storage Account '$mySA' in Resource Group '$myRG' deleted"
+	write-logFileWarning "Storage Account '$mySA' in Resource Group '$myRG' deleted"
 	write-logFile
 }
 
@@ -13192,7 +13243,7 @@ function new-storageAccount {
 		if ($?) {
 			if ( ($archiveMode) `
 			-and (!$archiveContainerOverwrite) `
-			-and (!$restartBlobs) ) {
+			-and (!$restartRemoteCopy) ) {
 				write-logFileError "Container '$targetSaContainer' already exists" `
 									"Existing archive might be overwritten" `
 									"Use RGCOPY switch 'archiveContainerOverwrite' for allowing this"
@@ -13509,11 +13560,14 @@ function new-resourceGroup {
 		$rgNeeded = $True
 	}
 
-	if ($blobCopyNeeded -and !$skipBlobs) {
+	if (($blobCopyNeeded -and !$skipRemoteCopy) `
+	-or ($snapshotCopyNeeded -and !$skipRemoteCopy)) {
 		$rgNeeded = $True
 	}
 
-	if ($justCopyDisks.count -ne 0) {
+	if (($justCopyBlobs.count -ne 0) `
+	-or ($justCopySnapshots.count -ne 0) `
+	-or ($justCopyDisks.count -ne 0)) {
 		$rgNeeded = $True
 	}
 
@@ -13689,8 +13743,9 @@ test () {
 
 '@ # empty line above needed!
 
-	write-stepStart "CHECK BACKGROUND JOBS COMPLETION EVERY $testDelayCopy MINUTE(S)"
+	write-stepStart "CHECK BACKGROUND JOBS COMPLETION"
 	$firstLoop = $True
+	$script:waitCount = 0
 	do {
 		if (!$firstLoop) {
 			Write-logFile
@@ -13738,7 +13793,10 @@ test () {
 			}
 		}
 
-		if (!$done) { Start-Sleep -seconds (60 * $testDelayCopy) }
+		if (!$done) { 
+			$delayMinutes = get-waitTime
+			Start-Sleep -seconds (60 * $delayMinutes)
+		}
 	} while (!$done)
 	write-stepEnd
 }
@@ -14204,12 +14262,12 @@ function test-givenArmTemplate {
 	# required steps:
 	$script:skipArmTemplate 	= $True
 	$script:skipSnapshots 		= $True
-	$script:skipBlobs 			= $True
+	$script:skipRemoteCopy 		= $True
 
 	write-logFileForbidden 'pathArmTemplate' @(
 		'useSnapshotCopy'
-		'useBlobs'
-		'skipBlobs'
+		'useBlobCopy'
+		'skipRemoteCopy'
 		'skipSnapshots'
 	)
 
@@ -14224,39 +14282,13 @@ function test-givenArmTemplate {
 }
 
 #-------------------------------------------------------------
-function test-justCopyBlobsOrDisks {
+function test-justCopyBlobsSnapshotsDisks {
 #-------------------------------------------------------------
-	if ($justCopyBlobs.count -ne 0) {
-		# required steps:
-		$script:skipArmTemplate		= $True
-		$script:skipDeployment 		= $True
-		
-		$script:skipSnapshots		= $True
-
-		# required settings:
-		$script:useBlobs			= $True
-		$script:useSnapshotCopy		= $False
-
-		write-logFileForbidden 'justCopyBlobs' @('justCopyDisks', 'useSnapshotCopy', 'useBlobs')
-	}
-
-	elseif ($justCopyDisks.count -ne 0) {
-		# required steps:
-		$script:skipArmTemplate		= $True
-		$script:skipDeployment 		= $True
-
-		write-logFileForbidden 'justCopyDisks' @('justCopyBlobs', 'useSnapshotCopy')
-	}
-
-	else {
-		return
-	}
-
-	# forbidden parameters:
+# forbidden parameters:
 	$forbidden = @(
 # general parameters
-		'simulate'
-		'skipWorkarounds'
+		# 'simulate'
+		# 'skipWorkarounds'
 		# 'pathExportFolder'
 		# 'hostPlainText'
 		# 'maxDOP'
@@ -14281,10 +14313,10 @@ function test-justCopyBlobsOrDisks {
 		# 'targetSubTenant'
 # operation steps
 		'skipArmTemplate'
-			'skipSnapshots'
+			# 'skipSnapshots'
 		'stopVMsSourceRG'
 		'skipBackups'
-		'skipBlobs'
+		'skipRemoteCopy'
 		'skipDeployment'
 			'skipDeploymentVMs'
 			'skipRestore'
@@ -14295,7 +14327,6 @@ function test-justCopyBlobsOrDisks {
 		'stopVMsTargetRG'
 		'deleteSnapshots'
 		'deleteSourceSA'
-		'deleteTargetSA'
 # operation modes
 		'justCreateSnapshots'
 		'justDeleteSnapshots'
@@ -14343,11 +14374,12 @@ function test-justCopyBlobsOrDisks {
 		# 'defaultDiskZone'
 		# 'defaultDiskName'
 # BLOB copy
-		# 'restartBlobs'
+		# 'restartRemoteCopy'
 		# 'justCopyBlobs'
+		# 'justCopySnapshots'
 		# 'justCopyDisks'
 		'justStopCopyBlobs'
-		# 'useBlobs'
+		# 'useBlobCopy'
 		# 'useSnapshotCopy'
 		# 'blobsSA'
 		# 'blobsRG'
@@ -14401,7 +14433,7 @@ function test-justCopyBlobsOrDisks {
 		'setDiskMaxShares'
 		'setDiskCaching'
 		'setDiskSku'
-		'setVmZone'
+		# 'setVmZone'
 		'setVmFaultDomain'
 		'setPrivateIpAlloc'
 		'removeFQDN'
@@ -14427,26 +14459,81 @@ function test-justCopyBlobsOrDisks {
 		'diagSettingsSA'
 	)
 
-	write-logFileForbidden 'justCopyBlobs' $forbidden
+	if ($justCopyBlobs.count -ne 0) {
+		# required steps:
+		$script:skipArmTemplate		= $True
+		$script:skipSnapshots		= $True
+		$script:skipDeployment 		= $True
+		$script:skipCleanup			= $True
+		
+		# required settings:
+		$script:useBlobCopy			= $True
+		$script:useSnapshotCopy		= $False
+
+		write-logFileForbidden 'justCopyBlobs' $forbidden
+		write-logFileForbidden 'justCopyBlobs' @(
+			# 'justCopyBlobs'
+			'justCopySnapshots'
+			'justCopyDisks'
+
+			'useSnapshotCopy'
+		)
+	}
+
+
+	elseif ($justCopySnapshots.count -ne 0) {
+		# required steps:
+		$script:skipArmTemplate		= $True
+		$script:skipSnapshots		= $True
+		$script:skipDeployment 		= $True
+		$script:skipCleanup			= $True
+
+		# required settings:
+		$script:useBlobCopy			= $False
+		$script:useSnapshotCopy		= $True
+
+		write-logFileForbidden 'justCopySnapshots' $forbidden
+		write-logFileForbidden 'justCopySnapshots' @(
+			'justCopyBlobs'
+			# 'justCopySnapshots'
+			'justCopyDisks'
+
+			'useBlobCopy'
+		)
+	}
+
+
+	elseif ($justCopyDisks.count -ne 0) {
+		# required steps:
+		$script:skipArmTemplate		= $True
+		# $script:skipSnapshots		= $True
+		$script:skipDeployment 		= $True
+
+		# required settings:
+		$script:createDisksManually	= $True
+
+		write-logFileForbidden 'justCopyDisks' $forbidden
+		write-logFileForbidden 'justCopyDisks' @(
+			'justCopyBlobs'
+			'justCopySnapshots'
+			# 'justCopyDisks'
+		)
+	}
 }
 
 #--------------------------------------------------------------
-function test-restartBlobs {
+function test-restartRemoteCopy {
 #--------------------------------------------------------------
-	if (!$restartBlobs) {
+	if (!$restartRemoteCopy) {
 		return
 	}
 
 	# required steps:
-	$script:skipArmTemplate		= $True
 	$script:skipSnapshots		= $True
 
-	# required settings:
-	$script:useBlobs			= $True
-
 	# forbidden parameters:
-	write-logFileForbidden 'restartBlobs' @(
-		'skipBlobs'
+	write-logFileForbidden 'restartRemoteCopy' @(
+		'skipRemoteCopy'
 		)
 }
 
@@ -14460,14 +14547,16 @@ function test-stopRestore {
 		$script:skipArmTemplate		= $True
 		$script:skipSnapshots		= $True
 		$script:skipBackups			= $True
-		$script:skipBlobs			= $True
+		$script:skipRemoteCopy		= $True
 		$script:skipDeploymentVMs	= $True
 
 		# forbidden parameters:
 		write-logFileForbidden 'continueRestore' @(
 			'stopRestore'
-			'restartBlobs'
+			'restartRemoteCopy'
 			'justCopyBlobs'
+			'justCopySnapshots'
+			'justCopyDisks'
 			'justStopCopyBlobs'
 			)
 	}
@@ -14482,8 +14571,10 @@ function test-stopRestore {
 		# forbidden parameters:
 		write-logFileForbidden 'stopRestore' @(
 			'continueRestore'
-			'restartBlobs'
+			'restartRemoteCopy'
 			'justCopyBlobs'
+			'justCopySnapshots'
+			'justCopyDisks'
 			'justStopCopyBlobs'
 			'startWorkload'
 			'deleteSourceSA'
@@ -14539,7 +14630,7 @@ function test-mergeMode {
 		#   'skipSnapshots'
 		# 'stopVMsSourceRG'
 		'skipBackups'
-		'skipBlobs'
+		'skipRemoteCopy'
 		'skipDeployment'
 		  'skipDeploymentVMs'
 		  'skipRestore'
@@ -14550,7 +14641,6 @@ function test-mergeMode {
 		'stopVMsTargetRG'
 		# 'deleteSnapshots'
 		'deleteSourceSA'
-		'deleteTargetSA'
 # operation modes
 		'justCreateSnapshots'
 		'justDeleteSnapshots'
@@ -14598,11 +14688,12 @@ function test-mergeMode {
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
-		'restartBlobs'
+		'restartRemoteCopy'
 		'justCopyBlobs'
+		'justCopySnapshots'
 		'justCopyDisks'
 		'justStopCopyBlobs'
-		# 'useBlobs'
+		# 'useBlobCopy'
 		# 'useSnapshotCopy'
 		'blobsSA'
 		'blobsRG'
@@ -14733,7 +14824,7 @@ function test-cloneMode {
 		#   'skipSnapshots'
 		# 'stopVMsSourceRG'
 		'skipBackups'
-		'skipBlobs'
+		'skipRemoteCopy'
 		'skipDeployment'
 		  'skipDeploymentVMs'
 		  'skipRestore'
@@ -14744,7 +14835,6 @@ function test-cloneMode {
 		'stopVMsTargetRG'
 		# 'deleteSnapshots'
 		'deleteSourceSA'
-		'deleteTargetSA'
 # operation modes
 		'justCreateSnapshots'
 		'justDeleteSnapshots'
@@ -14792,11 +14882,12 @@ function test-cloneMode {
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
-		'restartBlobs'
+		'restartRemoteCopy'
 		'justCopyBlobs'
+		'justCopySnapshots'
 		'justCopyDisks'
 		'justStopCopyBlobs'
-		'useBlobs'
+		'useBlobCopy'
 		'useSnapshotCopy'
 		'blobsSA'
 		'blobsRG'
@@ -14903,7 +14994,7 @@ function test-archiveMode {
 	$script:skipDeployment 		= $True
 	
 	# required settings:
-	$script:useBlobs			= $True
+	$script:useBlobCopy			= $True
 	$script:blobsRG				= $targetRG
 	$script:blobsSA				= $targetSA
 	$script:blobsSaContainer	= $archiveContainer
@@ -14916,7 +15007,7 @@ function test-archiveMode {
 	$params = @(
 		'skipArmTemplate'
 		'skipSnapshots'
-		'skipBlobs'
+		'skipRemoteCopy'
 	)
 	foreach ($param in $params) {
 		if ($param -in $boundParameterNames) {
@@ -14955,7 +15046,7 @@ function test-archiveMode {
 		#   'skipSnapshots'
 		# 'stopVMsSourceRG'
 		'skipBackups'
-		# 'skipBlobs'
+		# 'skipRemoteCopy'
 		'skipDeployment'
 		  'skipDeploymentVMs'
 		  'skipRestore'
@@ -14966,7 +15057,6 @@ function test-archiveMode {
 		'stopVMsTargetRG'
 		# 'deleteSnapshots'
 		'deleteSourceSA'
-		'deleteTargetSA'
 # operation modes
 		# 'justCreateSnapshots'
 		# 'justDeleteSnapshots'
@@ -15014,11 +15104,12 @@ function test-archiveMode {
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
-		# 'restartBlobs'
+		# 'restartRemoteCopy'
 		# 'justCopyBlobs'
+		'justCopySnapshots'
 		'justCopyDisks'
 		# 'justStopCopyBlobs'
-		'useBlobs'
+		'useBlobCopy'
 		'useSnapshotCopy'
 		'blobsSA'
 		'blobsRG'
@@ -15138,7 +15229,7 @@ if (!$updateMode) {
 		  'skipSnapshots'
 		# 'stopVMsSourceRG'
 		'skipBackups'
-		'skipBlobs'
+		'skipRemoteCopy'
 		'skipDeployment'
 		  'skipDeploymentVMs'
 		  'skipRestore'
@@ -15149,7 +15240,6 @@ if (!$updateMode) {
 		'stopVMsTargetRG'
 		# 'deleteSnapshots'
 		'deleteSourceSA'
-		'deleteTargetSA'
 # operation modes
 		'justCreateSnapshots'
 		'justDeleteSnapshots'
@@ -15197,11 +15287,12 @@ if (!$updateMode) {
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
-		'restartBlobs'
+		'restartRemoteCopy'
 		'justCopyBlobs'
+		'justCopySnapshots'
 		'justCopyDisks'
 		'justStopCopyBlobs'
-		'useBlobs'
+		'useBlobCopy'
 		'useSnapshotCopy'
 		'blobsSA'
 		'blobsRG'
@@ -15324,7 +15415,7 @@ if (!$patchMode) {
 		'skipSnapshots'
 		# 'stopVMsSourceRG'
 		'skipBackups'
-		'skipBlobs'
+		'skipRemoteCopy'
 		'skipDeployment'
 		'skipDeploymentVMs'
 		'skipRestore'
@@ -15335,7 +15426,6 @@ if (!$patchMode) {
 		'stopVMsTargetRG'
 		'deleteSnapshots'
 		'deleteSourceSA'
-		'deleteTargetSA'
 # operation modes
 		'justCreateSnapshots'
 		'justDeleteSnapshots'
@@ -15383,11 +15473,12 @@ if (!$patchMode) {
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
-		'restartBlobs'
+		'restartRemoteCopy'
 		'justCopyBlobs'
+		'justCopySnapshots'
 		'justCopyDisks'
 		'justStopCopyBlobs'
-		'useBlobs'
+		'useBlobCopy'
 		'useSnapshotCopy'
 		'blobsSA'
 		'blobsRG'
@@ -15507,7 +15598,7 @@ function test-copyMode {
 		#   'skipSnapshots'
 		# 'stopVMsSourceRG'
 		# 'skipBackups'
-		# 'skipBlobs'
+		# 'skipRemoteCopy'
 		# 'skipDeployment'
 		#   'skipDeploymentVMs'
 		#   'skipRestore'
@@ -15518,7 +15609,6 @@ function test-copyMode {
 		# 'stopVMsTargetRG'
 		# 'deleteSnapshots'
 		# 'deleteSourceSA'
-		# 'deleteTargetSA'
 # operation modes
 		# 'justCreateSnapshots'
 		# 'justDeleteSnapshots'
@@ -15566,11 +15656,12 @@ function test-copyMode {
 		# 'defaultDiskZone'
 		# 'defaultDiskName'
 # BLOB copy
-		# 'restartBlobs'
+		# 'restartRemoteCopy'
 		# 'justCopyBlobs'
+		# 'justCopySnapshots'
 		# 'justCopyDisks'
 		# 'justStopCopyBlobs'
-		# 'useBlobs'
+		# 'useBlobCopy'
 		# 'useSnapshotCopy'
 		# 'blobsSA'
 		# 'blobsRG'
@@ -16862,7 +16953,8 @@ function get-az_local {
 		$script:az_virtualMachineScaleSets = @( 
 			Get-AzVmss `
 				-ResourceGroupName $sourceRG `
-				-ErrorAction 'SilentlyContinue'
+				-ErrorAction 'SilentlyContinue' `
+				-WarningAction 'SilentlyContinue'
 		)
 		test-cmdlet 'az_virtualMachineScaleSets'  "Could not get VMSS of resource group $sourceRG"
 
@@ -18475,7 +18567,7 @@ function step-backups {
 		return
 	}
 
-	# simulate running Tasks for restartBlobs
+	# simulate running Tasks for restartRemoteCopy
 	$script:runningTasks = @()
 	# collect not-running VMs
 	$script:toBeStartedVMs = @()
@@ -18495,8 +18587,8 @@ function step-backups {
 			$script:toBeStartedVMs += $_.Name
 		}
 	}
-	# simulate running Tasks for restartBlobs
-	if ($restartBlobs) {
+	# simulate running Tasks for restartRemoteCopy
+	if ($restartRemoteCopy) {
 		return
 	}
 
@@ -18571,33 +18663,23 @@ function step-copyBlobsAndSnapshots {
 		save-archiveTemplate
 	}
 
-	if ($blobCopyNeeded -and !$skipBlobs -and !$restartBlobs) {
-		grant-access
-		start-copyBlobs
+	if ($blobCopyNeeded -and !$skipRemoteCopy) {
+		if (!$restartRemoteCopy) {
+			grant-access
+			start-copyBlobs
+		}
 	}
 
-	if ($snapshotCopyNeeded -and !$skipBlobs) {
-		copy-snapshots
+	if ($snapshotCopyNeeded -and !$skipRemoteCopy) {
+		if (!$restartRemoteCopy) {
+			copy-snapshots
+		}
+		wait-CopySnapshots
 	}
 
-	if ($blobCopyNeeded -and !$skipBlobs) {
+	if ($blobCopyNeeded -and !$skipRemoteCopy) {
 		wait-copyBlobs
 		revoke-access
-	}
-
-	# save BLOB and snapshot size
-	if (!$archiveMode) {
-		$script:copyDisks.Values
-		| Where-Object Skip -ne $True
-		| ForEach-Object {
-
-			if ($_.SnapshotCopy) {
-				$script:totalSnapshotSizeTarget += $_.SizeGB
-			}
-			elseif ($_.BlobCopy) {
-				$script:totalBlobSize += $_.SizeGB
-			}
-		}
 	}
 
 	# wait for backup finished (not done in step step-backups)
@@ -18640,7 +18722,7 @@ function step-deployment {
 		if ($createDisksManually -or $dualDeployment) {
 
 			if (!$(wait-completion "DISK CREATION" `
-						'disks' $targetRG $snapshotWaitCreationMinutes $testDelayCreation)) {
+						'disks' $targetRG $snapshotWaitCreationMinutes)) {
 
 				write-logFileError "Disk creation completion did not finish within $snapshotWaitCreationMinutes minutes"
 			}
@@ -18710,6 +18792,7 @@ function step-cleanup {
 		return
 	}
 
+	#--------------------------------------------------------------
 	# stop VMs
 	if ($stopVMsTargetRG) {
 		if ($skipDeployment -or $skipDeploymentVMs) {
@@ -18724,31 +18807,44 @@ function step-cleanup {
 		}
 	}
 
-	# delete snapshots in source RG
-	if ($deleteSnapshots) {
 
-		$snapshotNames = ( $script:copyDisks.Values `
-							| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) } `
-							| Where-Object SnapshotSwap -ne $True ).SnapshotName
-
-		if ($snapshotNames.count -gt 0) {
-			set-context $sourceSub # *** CHANGE SUBSCRIPTION **************
-			remove-snapshots $sourceRG $snapshotNames
-		}
-	}
-
+	#--------------------------------------------------------------
 	# ALWAYS delete snapshots in target RG
 	$snapshotNames = ( $script:copyDisks.Values `
 						| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) } `
 						| Where-Object SnapshotCopy -eq $True ).SnapshotName
 
 	if ($snapshotNames.count -gt 0) {
+
 		set-context $targetSub # *** CHANGE SUBSCRIPTION **************
 		remove-snapshots $targetRG $snapshotNames
 	}
 
+
+	#--------------------------------------------------------------
+	# delete snapshots in source RG
+	$snapshotNames = ( $script:copyDisks.Values `
+						| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) } `
+						| Where-Object SnapshotSwap -ne $True ).SnapshotName
+
+	if ($snapshotNames.count -gt 0) {
+		
+		if ($deleteSnapshots) {
+
+			set-context $sourceSub # *** CHANGE SUBSCRIPTION **************
+			remove-snapshots $sourceRG $snapshotNames
+		}
+		else {
+			write-logFileWarning "Parameter 'deleteSnapshots' was not supplied" `
+								"Snapshots '*.rgcopy' in source RG '$sourceRG' have not been deleted"
+		}
+	}
+
+
+	#--------------------------------------------------------------
 	# delete storage account in source RG
 	if ($deleteSourceSA) {
+
 		if ($skipRestore) {
 			if ('deleteSourceSA' -in $boundParameterNames) {
 				write-logFileWarning "parameter 'deleteSourceSA' ignored" `
@@ -18763,19 +18859,19 @@ function step-cleanup {
 		}
 	}
 
+
+	#--------------------------------------------------------------
 	# delete storage account in target RG
-	if ($deleteTargetSA) {
-		if ($skipBlobs -or $skipDeployment -or $skipDeploymentVMs) {
-			if ('deleteTargetSA' -in $boundParameterNames) {
-				write-logFileWarning "parameter 'deleteTargetSA' ignored" `
-									"Storage account '$targetSA' has not been used during the current run of RGCOPY" `
-									"Delete the storage account manually'"
-			}
+	if ($deleteTargetSA) { # set by default
+
+		if ($skipDeployment -or $skipDeploymentVMs) {
+			write-logFileWarning "Storage account '$targetSA' has not been deleted" `
+								"because disks have not been deployed"
+
 		}
 		else {
 			set-context $targetSub # *** CHANGE SUBSCRIPTION **************
 			remove-storageAccount $targetRG $targetSA
-			$script:totalBlobSize = 0
 		}
 	}
 }
@@ -19485,6 +19581,7 @@ try {
 		write-logFile $rgcopyMode.PadLeft($starCount - 55 - $rgcopyVersion.length) -ForegroundColor 'Yellow'
 		write-logFile ('*' * $starCount) -ForegroundColor DarkGray
 		write-logFile "Get help at: https://github.com/azure-core/rg-copy/blob/development/rgcopy-docu.md" -ForegroundColor DarkGray
+		test-msInternalRestrictions
 	}
 	else {
 		$starCount = 70
@@ -19541,13 +19638,6 @@ try {
 		$blobsSA = $targetSA
 	}
 	if ($blobsSaContainer.Length -eq 0)	{
-		$blobsSaContainer = $targetSaContainer
-	}
-	
-	# ignore parameters above when skipBlobs was not set
-	if (!$skipBlobs) {
-		$blobsRG = $targetRG
-		$blobsSA = $targetSA
 		$blobsSaContainer = $targetSaContainer
 	}
 	
@@ -20036,12 +20126,13 @@ try {
 	test-copyMode
 	test-cloneMode
 	test-mergeMode
-	test-archiveMode			# useBlobs = $True
-	test-justCopyBlobsOrDisks	# useBlobs = $True
-	test-restartBlobs			# useBlobs = $True
-	test-stopRestore			# skipBlobs = $True
-	test-givenArmTemplate		# skipBlobs = $True
+	test-archiveMode			# useBlobCopy = $True
+	test-justCopyBlobsSnapshotsDisks
+	test-restartRemoteCopy
+	test-stopRestore			# skipRemoteCopy = $True
+	test-givenArmTemplate		# skipRemoteCopy = $True
 
+	# delete storage account in target RG by default
 	if (('deleteTargetSA' -notin $boundParameterNames) -and ($copyMode -or $mergeMode)) {
 		$deleteTargetSA = $True
 	}
@@ -20055,43 +20146,52 @@ try {
 	if ($simulate) {
 		$skipSnapshots	= $True
 		$skipBackups	= $True
-		$skipBlobs		= $True
+		$skipRemoteCopy	= $True
 		$skipDeployment	= $True
+		$skipExtensions = $True
 		$skipCleanup	= $True
 		$startWorkload	= $False
 	}
 
-	if ($useSnapshotCopy) {
-		$useIncSnapshots = $True
-	}
-
 	if ($skipDeployment) {
 		$skipDeploymentVMs = $True
+		$skipExtensions    = $True
 	}
 
-	
-	if (!$skipBlobs) {
-		if ($useBlobs `
-		-or $useSnapshotCopy `
-		-or ($sourceSubUser -ne $targetSubUser) `
-		-or ($sourceSubTenant -ne $targetSubTenant)) {
-	
-			$displayBlobCopy = $True
+	if ('skipRemoteCopy' -in $boundParameterNames) {
+		$skipSnapshots = $True
+	}
+
+	# BLOB/snapshot copy needed?
+	$RemoteCopyNeeded = $False
+	if ($useBlobCopy `
+	-or $useSnapshotCopy `
+	-or ($sourceLocation -ne $targetLocation)) {
+
+		$RemoteCopyNeeded = $True
+	}
+
+	if (($sourceSubUser   -ne $targetSubUser) `
+	-or ($sourceSubTenant -ne $targetSubTenant)) {
+
+		if (!$msInternalVersion) {
+			$RemoteCopyNeeded = $True
 		}
 	}
 
+	if (!$RemoteCopyNeeded) {
+		$skipRemoteCopy = $True
+	}
+	
 	# output of steps
 	if ($skipArmTemplate  ) {$doArmTemplate     = '[ ]'} else {$doArmTemplate     = '[X]'}
-	if ($skipSnapshots -or $simulate) {$doSnapshots = '[ ]'} else {$doSnapshots   = '[X]'}
-	if ($skipBackups      ) {$doBackups         = '[ ]'} else {$doBackups         = '[X]'}
-	if ($displayBlobCopy  ) {$doBlobs           = '[X]'} else {$doBlobs           = '[ ]'}
-	if ($skipDeploymentVMs) {$doDeploymentVMs   = '[ ]'} else {$doDeploymentVMs   = '[X]'}
-	if ($skipRestore      ) {$doRestore         = '[ ]'} else {$doRestore         = '[X]'}
+	if ($skipSnapshots    ) {$doSnapshots       = '[ ]'} else {$doSnapshots       = '[X]'}
+	if ($skipRemoteCopy   ) {$doRemoteCopy      = '[ ]'} else {$doRemoteCopy      = '[X]'}
+	if ($skipDeploymentVMs) {$doDeployment      = '[ ]'} else {$doDeployment      = '[X]'}
 	if ($skipExtensions   ) {$doExtensions      = '[ ]'} else {$doExtensions      = '[X]'}
 	if ($startWorkload    ) {$doWorkload        = '[X]'} else {$doWorkload        = '[ ]'}
 	if ($deleteSnapshots  ) {$doDeleteSnapshots = '[X]'} else {$doDeleteSnapshots = '[ ]'}
 	if ($deleteSourceSA   ) {$doDeleteSourceSA  = '[X]'} else {$doDeleteSourceSA  = '[ ]'}
-	if ($deleteTargetSA   ) {$doDeleteTargetSA  = '[X]'} else {$doDeleteTargetSA  = '[ ]'}
 	if ($stopVMsTargetRG  ) {$doStopVMsTargetRG = '[X]'} else {$doStopVMsTargetRG = '[ ]'}
 
 	write-logFile 'Required steps:'
@@ -20100,7 +20200,7 @@ try {
 	if ($cloneOrMergeMode) {
 		write-logFile	"  $doArmTemplate Create BICEP Template (refering to snapshots)"
 		write-logFile	"  $doSnapshots Create snapshots of disks"
-		write-logFile	"  $doDeploymentVMs Deployment"
+		write-logFile	"  $doDeployment Deployment"
 		write-logFile	"  $doDeleteSnapshots Delete Snapshots"
 	}
 
@@ -20108,52 +20208,52 @@ try {
 	# justCopyDisks	
 	elseif ($justCopyDisks.count -ne 0) {
 		write-logFile	"  $doSnapshots Create snapshots of disks (in source RG)"
-		write-logFile	"  $doBlobs Create BLOBs (in target RG)"
-		write-logFile	"  [X] Deploy Disks"	
+		write-logFile	"  $doRemoteCopy Copy snapshots (into target RG)"
+		if ($simulate) {
+			write-logFile	"  [ ] Create disks manually"	
+		}
+		else {
+			write-logFile	"  [X] Create disks manually"	
+		}
 	}
 
 	#--------------------------------------------------------------
 	# other modes
 	else {
-		# ARM template
+		# prepare
+		write-logFile	"  Prepare:"
 		if ($useBicep) {
-			write-logFile	"  $doArmTemplate Create BICEP Template (refering to snapshots or BLOBs)"
+			write-logFile	"    $doArmTemplate Create BICEP Template (referring to snapshots)"
 		}
 		else {
-			write-logFile	"  $doArmTemplate Create ARM Template (refering to snapshots or BLOBs)"
+			write-logFile	"    $doArmTemplate Create ARM Template (refering to snapshots)"
 		}
-
-		# snapshots/backups/blobs
-		write-logFile		"  $doSnapshots Create snapshots (of disks and volumes in source RG)"
-		write-logFile		"  $doBackups Create file backup (of disks and volumes in source RG NFS Share)"
-		write-logFile		"  $doBlobs Create BLOBs or copy snapshots (into target RG)"
+		write-logFile		"    $doSnapshots Create snapshots (in source RG)"
+		if (!$skipBackups) {
+			write-logFile	"    [X] Create file backup (of disks and volumes in source RG NFS Share)"
+		}
+		write-logFile		"    $doRemoteCopy Copy snapshots (into target RG)"
 
 		# deployment
-		if ($skipDeployment) {
-			write-logFile	"  $doDeploymentVMs Deployment"
+		write-logFile	"  Deploy:"
+		write-logFile		"    $doDeployment Deploy Virtual Machines"
+		if (!$skipRestore) {
+			write-logFile	"    [X] Restore files"
 		}
-		else {
-			write-logFile	"      Deployment: $doDeploymentVMs Deploy Virtual Machines"
-			write-logFile	"                  $doRestore Restore files"
-			write-logFile 	"                  $doExtensions Deploy Extensions"
-		}
+		write-logFile 		"    $doExtensions Deploy Extensions"
 
 		# workload
-		write-logFile		"  $doWorkload Workload and Analysis"
+		write-logFile	"  Workload:"
+		write-logFile	"    $doWorkload Run and Analysis"
 
 		# cleanup
-
-
-
-		if (!$stopVMsTargetRG -and !$deleteSnapshots -and !$deleteSourceSA -and !$deleteTargetSA) {
-			write-logFile	"  [ ] Cleanup"
+		write-logFile	"  Cleanup:"
+		write-logFile		"    $doDeleteSnapshots Delete Snapshots (in source RG)"
+		if ($doDeleteSourceSA -eq '[X]') {
+			write-logFile	"    $doDeleteSourceSA Delete Storage Account (in source RG)"
 		}
-		else {
-			write-logFile	"      Cleanup:    $doDeleteSnapshots Delete Snapshots in source RG"
-			write-logFile	"                  $doDeleteSourceSA Delete Storage Account in source RG"
-			write-logFile	"                  $doDeleteTargetSA Delete Storage Account in target RG"
-			write-logFile	"                  $doStopVMsTargetRG Stop VMs in target RG"
-		}
+		write-logFile		"    $doStopVMsTargetRG Stop VMs (in target RG)"
+
 	}
 	write-logFile
 	
@@ -20162,9 +20262,6 @@ try {
 	#--------------------------------------------------------------
 	$script:sapAlreadyStarted = $False
 	$script:vmStartWaitDone = $False
-	$script:totalBlobSize = 0
-	$script:totalSnapshotSize = 0
-	$script:totalSnapshotSizeTarget = 0
 
 	if ($allowRunningVMs) {
 		write-logFileWarning 'Parameter allowRunningVMs is set. This could result in inconsistent disk copies.'
@@ -20174,14 +20271,13 @@ try {
 	# get source VMs/Disks
 	if (!$skipArmTemplate `
 	-or !$skipSnapshots `
-	-or ($useBlobs -and !$skipBlobs) `
-	-or ($justCopyDisks.count -ne 0) `
-	-or ($justCopyBlobs.count -ne 0) ) {
+	-or !$skipRemoteCopy `
+	-or !$skipBackups `
+	-or !$skipRestore `
+	-or ($justCopyDisks.count -ne 0) ) {
 
 		get-sourceVMs
-		if ($justCopyBlobs.count -eq 0) {
-			assert-vmsStopped
-		}
+		assert-vmsStopped
 	}
 
 	step-armTemplate
@@ -20195,26 +20291,16 @@ try {
 	
 	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
 	$script:sapAlreadyStarted = $False
-	if ($justCopyDisks.count -ne 0) {
+	if (($justCopyDisks.count -ne 0) -and !$simulate) {
 		update-diskZone
 		new-disks
 	}
+
 	step-deployment
 	step-workload
 	step-cleanup
-	set-context $sourceSub # *** CHANGE SUBSCRIPTION **************
 
-	if (($script:totalSnapshotSize + $script:totalSnapshotSizeTarget) -gt 0) {
-		write-logFileWarning "Parameter 'deleteSnapshots' was not supplied" `
-							"RGCOPY created snapshots in source RG '$sourceRG' but did not delete them" `
-							"The total size of the snapshots in source RG '$sourceRG' is $($script:totalSnapshotSize) GiB" `
-							# "The total size of the snapshots in target RG '$targetRG' is $($script:totalSnapshotSizeTarget) GiB"
-	}
-	if ($script:totalBlobSize -gt 0) {
-		write-logFileWarning "Parameter 'deleteTargetSA' was not supplied" `
-							"RGCOPY created BLOBs in target RG '$targetRG' but did not delete them" `
-							"The total size of the BLOBs is $($script:totalBlobSize) GiB"
-	}
+	set-context $sourceSub # *** CHANGE SUBSCRIPTION **************
 }
 catch {
 	Write-Output $error[0]

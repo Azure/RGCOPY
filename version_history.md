@@ -1,5 +1,15 @@
 ## Version history
-#### RGCOPY 0.9.63 Mai 2024
+#### RGCOPY 0.9.64 June 2024
+type|change
+:---|:---
+feature|Make snapshot copy default when copying into a different region. Therefore, no storage account is needed anymore.
+feature|Use variable wait times. Remove parameters `testDelayCreation` and `testDelayCopy`.
+feature|Always SNAPSHOT copy rather than BLOB copy for disks larger than 4TiB
+feature|Rename parameter `useBlobs` to `useBlobCopy`. Rename `skipBlobs` to `skipRemoteCopy`. Rename `restartBlobs` to `restartRemoteCopy`.
+feature|New parameter `dualDeployment`. Without setting this parameter, a separate template for disk creation is never used.
+bug fix|Always delete snapshots in target RG *before* deleting snapshots in source RG
+
+#### RGCOPY 0.9.63 May 2024
 type|change
 :---|:---
 feature|Never allow shared key access for storage accounts.<BR>You should use snapshot copy rather than BLOB copy if RGCOPY has only the `Subscription Contributor` role in the target subscription.
