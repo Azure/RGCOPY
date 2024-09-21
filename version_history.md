@@ -1,4 +1,13 @@
 ## Version history
+#### RGCOPY 0.9.65 September 2024
+type|change
+:---|:---
+feature|Support for IP tags.
+feature|New value `false` for parameter `setVmZone` (and `setDiskSku`). When set, the existing zone of the VM (or SKU of the disk) is not changed by RGCOPY. 
+experimental feature|Patching Windows VMs (not only Linux) in PATCH mode. Set RG owner in patch mode.
+feature|Fix compatibility issue with Az version 13: Breaking change of Get-AzAccessToken.
+feature|Allow BLOB copy for Microsoft internal version of RGCOPY (using storage account network rules and delegation keys).
+
 #### RGCOPY 0.9.64 June 2024
 type|change
 :---|:---

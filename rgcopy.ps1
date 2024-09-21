@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.64
-version date:     June 2024
+version:          0.9.65
+version date:     September 2024
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 
@@ -394,6 +394,8 @@ param (
 	,[string] $monitorRG
 	,$setVmTipGroup			= @()
 	,$setGroupTipSession	= @()
+	,[string] $setIpTag
+	,[string] $setIpTagType	= 'FirstPartyUsage'
 	,[switch] $allowRunningVMs
 	,[switch] $skipGreenlist
 	,[switch] $skipStartSAP
@@ -3590,11 +3592,8 @@ function save-copyDisks {
 		if (($sourceSubUser   -ne $targetSubUser) `
 		-or ($sourceSubTenant -ne $targetSubTenant)) {
 
-			# only possible for OSS version of RGCOPY
-			if (!$msInternalVersion) {
-				$blobCopy 			= $True
-				$snapshotCopy 		= $False
-			}
+			$blobCopy 			= $True
+			$snapshotCopy 		= $False
 		}
 
 		# BLOB copy does not work for BLOBs larger than 4TiB using Start-AzStorageBlobCopy
@@ -3763,7 +3762,8 @@ function save-copyDisks {
 			Caching					= 'None'	# will be updated below by VM info
 			DiskControllerType		= ''		# will be updated below by VM info
 			WriteAcceleratorEnabled	= $False 	# will be updated below by VM info
-			AbsoluteUri 			= ''		# access token for copy to BLOB
+			AbsoluteUri 			= ''		# access token for source snapshot
+			DelegationToken 		= ''		# access token for target BLOB
 			SkuName     			= $sku
 			VmRestrictions			= $False	# will be updated later
 			DiskIOPSReadWrite		= $DiskIOPSReadWrite  #e.g. 1024
@@ -5305,7 +5305,7 @@ function update-paramSetVmZone {
 			$vmZone = 'none'
 		}
 
-		test-values 'setVmZone' $vmZone @('none','1','2','3') 'zone'
+		test-values 'setVmZone' $vmZone @('none','1','2','3', 'false') 'zone'
 		# convert to internal syntax
 		if ($vmZone -eq 'none') {
 			$vmZone = 0
@@ -5316,7 +5316,12 @@ function update-paramSetVmZone {
 		| Where-Object Name -in $script:paramVMs
 		| ForEach-Object {
 
-			$_.VmZoneNew = $vmZone
+			if ($vmZone -eq 'false') {
+				$_.VmZoneNew = $_.VmZone
+			}
+			else {
+				$_.VmZoneNew = $vmZone
+			}
 		}
 		get-ParameterRule
 	}
@@ -5480,13 +5485,18 @@ function update-paramSetDiskSku {
 	while ($Null -ne $script:paramConfig) {
 
 		$sku = $script:paramConfig
-		test-values 'setDiskSku' $sku @('Premium_LRS', 'StandardSSD_LRS', 'Standard_LRS', 'Premium_ZRS', 'StandardSSD_ZRS', 'PremiumV2_LRS', 'UltraSSD_LRS') 'sku'
+		test-values 'setDiskSku' $sku @('false', 'Premium_LRS', 'StandardSSD_LRS', 'Standard_LRS', 'Premium_ZRS', 'StandardSSD_ZRS', 'PremiumV2_LRS', 'UltraSSD_LRS') 'sku'
 
 		$script:copyDisks.values
 		| Where-Object {$_.Name -in $script:paramDisks}
 		| ForEach-Object {
 
-			$_.SkuNameNew = $sku
+			if ($sku -eq 'false') {
+				$_.SkuNameNew = $_.SkuName
+			}
+			else {
+				$_.SkuNameNew = $sku
+			}
 		}
 		get-ParameterRule
 	}
@@ -6600,7 +6610,8 @@ function copy-snapshots {
 	$savedSub = $script:currentSub
 	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
 
-	$token = (Get-AzAccessToken).Token
+	$secureToken= Get-AzAccessToken -AsSecureString -WarningAction 'SilentlyContinue'
+	$token = ConvertFrom-SecureString $secureToken.Token -AsPlainText
 
 	# update $script:copyDisks
 	$script:copyDisks.Values
@@ -6811,7 +6822,7 @@ function wait-completion {
 			}
 		}
 
-		write-logFile (Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz')
+		write-logFile "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz') $step COMPLETION"
 		$percentAll = 100
 		foreach ($item in $res) {
 			if (($type -ne 'snapshots') -or ($item.Incremental -eq $True)) {
@@ -6897,9 +6908,103 @@ function remove-snapshots {
 }
 
 #--------------------------------------------------------------
+function add-ipRule {
+#--------------------------------------------------------------
+	if (!$msInternalVersion) {
+		return
+	}
+
+	$savedSub = $script:currentSub
+	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
+
+	$ip = $Null
+
+	# get public IP of local PC: first try
+	try {
+		$ip = (Invoke-WebRequest ifconfig.me/ip -ErrorAction 'Stop').Content.Trim()
+	}
+	catch {
+		$ip = $Null
+	}
+
+	# check syntax for IPv4
+	if ($ip -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+		# second try
+		$ip = $Null
+		try {
+			$ip = (Resolve-DnsName `
+				-Name			myip.opendns.com `
+				-Server			208.67.222.220 `
+				-ErrorAction	'Stop' `
+				-WarningAction	'SilentlyContinue').IPAddress	
+		}
+		catch {
+			$ip = $Null
+		}
+	}
+
+	# check syntax for IPv4
+	if ($ip -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+		write-logFileError 'Getting public IP Address of local PC failed'
+	}
+
+	write-logFile "Granting access to storage account '$targetSA' for public IP $ip ..."
+	write-logFileWarning "All VPN connections must be closed"
+
+	Add-AzStorageAccountNetworkRule `
+		-ResourceGroupName	$targetRG `
+		-Name 				$targetSA `
+		-IPAddressOrRange 	$ip `
+		-ErrorAction		'SilentlyContinue' | Out-Null
+	test-cmdlet 'Add-AzStorageAccountNetworkRule'  "Granting access to storage account '$targetSA' for public IP $ip failed"
+
+	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
+}
+
+#--------------------------------------------------------------
+function new-delegationToken {
+#--------------------------------------------------------------
+	if (!$msInternalVersion) {
+		return
+	}
+
+	$savedSub = $script:currentSub
+	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
+
+	write-logFile "Creating delegation token..."
+
+	$context = New-AzStorageContext `
+				-StorageAccountName		$targetSA `
+				-UseConnectedAccount `
+				-ErrorAction			'SilentlyContinue'
+	test-cmdlet 'New-AzStorageContext'  "Getting Context for storage account '$targetSA' failed"
+
+	$StartTime = Get-Date
+	$EndTime = $startTime.AddDays(7)
+
+	$script:delegationToken = New-AzStorageContainerSASToken `
+			-Name			$targetSaContainer `
+			-Permission 	'crwdl' `
+			-StartTime		$startTime `
+			-ExpiryTime		$endTime `
+			-context		$context `
+			-ErrorAction	'SilentlyContinue'
+	test-cmdlet 'New-AzStorageContainerSASToken'  "Creating delegation token for storage account '$targetSA' failed"	
+
+	# save token for each disk
+	$script:copyDisks.values
+	| ForEach-Object {
+		$_.DelegationToken = $script:delegationToken
+	}
+
+	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
+}
+
+#--------------------------------------------------------------
 function grant-access {
 #--------------------------------------------------------------
-	$token = (Get-AzAccessToken).Token
+	$secureToken = Get-AzAccessToken -AsSecureString -WarningAction 'SilentlyContinue'
+	$token = ConvertFrom-SecureString $secureToken.Token -AsPlainText
 
 	# update $script:copyDisks
 	$script:copyDisks.Values
@@ -7020,6 +7125,8 @@ function grant-access {
 	#--------------------------------------------------------------
 	# start execution
 	write-stepStart "GRANT ACCESS TO SNAPSHOTS" $maxDOP
+	add-ipRule
+	write-logFile
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 
 	$script:copyDisks.Values
@@ -7032,6 +7139,9 @@ function grant-access {
 	if (!$?) {
 		write-logFileError "Grant Access to snapshot failed"
 	}
+
+	write-logFile
+	new-delegationToken
 	write-stepEnd
 }
 
@@ -7080,20 +7190,76 @@ function revoke-access {
 }
 
 #--------------------------------------------------------------
+function get-saKey {
+#--------------------------------------------------------------
+	param (
+		$mySub,
+		$myRG,
+		$mySA
+	)
+
+	if ($msInternalVersion -or ($Null -ne $script:targetSaKey)) {
+		return
+	}
+
+	$savedSub = $script:currentSub
+	set-context $mySub # *** CHANGE SUBSCRIPTION **************
+
+	# Get Storage Account KEY
+	$script:targetSaKey = (Get-AzStorageAccountKey `
+								-ResourceGroupName	$myRG `
+								-AccountName 		$mySA `
+								-WarningAction		'SilentlyContinue' `
+								-ErrorAction		'SilentlyContinue' `
+						| Where-Object KeyName -eq 'key1').Value
+
+	test-cmdlet 'Get-AzStorageAccountKey'  "Could not get key for Storage Account '$mySA'"
+
+	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
+}
+
+#--------------------------------------------------------------
 function start-copyBlobs {
 #--------------------------------------------------------------
+	write-stepStart "START COPY TO BLOB" $maxDOP
+
+	get-saKey $targetSub $targetRG $targetSA
+
 	# using parameters for parallel execution
 	$scriptParameter =  "`$targetSaContainer = '$targetSaContainer';"
 	$scriptParameter += "`$targetSA = '$targetSA';"
+	$scriptParameter += "`$targetSaKey = '$($script:targetSaKey -replace '''', '''''')';"
 
-	# parallel running script
-	$script = {
-		Write-Output "... copying '$($_.SnapshotName)' to BLOB '$($_.Name).vhd'"
+	# header using Delegation Token
+	if ($msInternalVersion) {
+		write-logFile "Using Delegation Token"
 
-		$destinationContext = New-AzStorageContext `
-								-StorageAccountName   $targetSA `
-								-UseConnectedAccount `
-								-ErrorAction 'SilentlyContinue'
+		$sc1 = {
+			Write-Output "... copying '$($_.SnapshotName)' to BLOB '$($_.Name).vhd'"
+
+			$destinationContext = New-AzStorageContext `
+									-StorageAccountName		$targetSA `
+									-SasToken				$_.DelegationToken `
+									-ErrorAction			'SilentlyContinue'
+		}
+	}
+
+	# header using Storage Account Key
+	else {
+		write-logFile "Using Storage Account Key"
+		$sc1 = {
+			Write-Output "... copying '$($_.SnapshotName)' to BLOB '$($_.Name).vhd'"
+			
+			$destinationContext = New-AzStorageContext `
+									-StorageAccountName   	$targetSA `
+									-StorageAccountKey    	$targetSaKey `
+									-ErrorAction			'SilentlyContinue' `
+									-WarningAction			'SilentlyContinue'
+		}	
+	}
+
+	# body
+	$sc2 = {
 
 		$param = @{
 			DestContainer	= $targetSaContainer
@@ -7114,10 +7280,9 @@ function start-copyBlobs {
 		Write-Output "$($_.Name).vhd"
 	}
 
-	# start execution
-	write-stepStart "START COPY TO BLOB" $maxDOP
-	write-logFile "using role-based access control" -ForegroundColor DarkGray
 
+	# start execution
+	$script = [Scriptblock]::Create(($sc1 -as [string]) + ($sc2 -as [string]))
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
@@ -7134,20 +7299,49 @@ function start-copyBlobs {
 #--------------------------------------------------------------
 function stop-copyBlobs {
 #--------------------------------------------------------------
+	write-stepStart "STOP COPY TO BLOB" $maxDOP
+
+	get-saKey $targetSub $targetRG $targetSA
+
 	# using parameters for parallel execution
 	$scriptParameter =  "`$targetSaContainer = '$targetSaContainer';"
 	$scriptParameter += "`$targetSA = '$targetSA';"
+	$scriptParameter += "`$targetSaKey = '$($script:targetSaKey -replace '''', '''''')';"
+	
+	# header using Delegation Token
+	if ($msInternalVersion) {
+		write-logFile "Using Delegation Token"
 
-	# parallel running script
-	$script = {
-		$diskname = $_.Name
-		Write-Output "... stopping BLOB copy $diskname.vhd"
-		try {
+		$sc1 = {
+			$diskname = $_.Name
+			Write-Output "... stopping BLOB copy $diskname.vhd"
+
 			$destinationContext = New-AzStorageContext `
-									-StorageAccountName   $targetSA `
-									-UseConnectedAccount `
-									-ErrorAction 'SilentlyContinue'
+									-StorageAccountName		$targetSA `
+									-SasToken				$_.DelegationToken `
+									-ErrorAction			'SilentlyContinue'
+		}
+	}
 
+	# header using Storage Account Key
+	else {
+		write-logFile "Using Storage Account Key"
+
+		$sc1 = {
+			$diskname = $_.Name
+			Write-Output "... stopping BLOB copy $diskname.vhd"
+
+			$destinationContext = New-AzStorageContext `
+									-StorageAccountName   	$targetSA `
+									-StorageAccountKey    	$targetSaKey `
+									-ErrorAction			'SilentlyContinue' `
+									-WarningAction			'SilentlyContinue'
+		}	
+	}
+
+	# body
+	$sc2 = {
+		try {
 			Stop-AzStorageBlobCopy `
 				-Container    $targetSaContainer `
 				-Context      $destinationContext `
@@ -7164,9 +7358,7 @@ function stop-copyBlobs {
 	}
 
 	# start execution
-	write-stepStart "STOP COPY TO BLOB" $maxDOP
-	write-logFile "using role-based access control" -ForegroundColor DarkGray
-
+	$script = [Scriptblock]::Create(($sc1 -as [string]) + ($sc2 -as [string]))
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
@@ -7184,11 +7376,30 @@ function stop-copyBlobs {
 function wait-copyBlobs {
 #--------------------------------------------------------------
 	write-stepStart "CHECK BLOB COPY COMPLETION" -skipLF
-	
-	$destinationContext = New-AzStorageContext `
-		-StorageAccountName   $targetSA `
-		-UseConnectedAccount `
-		-ErrorAction 'SilentlyContinue'
+
+	get-saKey $targetSub $targetRG $targetSA
+
+	# using Delegation Token
+	if ($msInternalVersion) {
+		write-logFile "Using Delegation Token"
+
+		$destinationContext = New-AzStorageContext `
+								-StorageAccountName		$targetSA `
+								-SasToken				$script:delegationToken `
+								-ErrorAction			'SilentlyContinue'
+	}
+
+	# using Storage Account Key
+	else {
+		write-logFile "Using Storage Account Key"
+
+		$destinationContext = New-AzStorageContext `
+								-StorageAccountName   	$targetSA `
+								-StorageAccountKey    	$targetSaKey `
+								-ErrorAction 			'SilentlyContinue' `
+								-WarningAction			'SilentlyContinue'
+	}
+
 	test-cmdlet 'New-AzStorageContext'  "Could not get context for Storage Account '$targetSA'"
 
 	# create tasks
@@ -7209,7 +7420,7 @@ function wait-copyBlobs {
 	$script:waitCount = 0
 	do {
 		Write-logFile
-		write-logFile (Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz')
+		write-logFile "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz') BLOB COPY COMPLETION"
 		$done = $True
 		foreach ($task in $runningBlobTasks) {
 
@@ -7220,10 +7431,11 @@ function wait-copyBlobs {
 
 				try {
 					$state = Get-AzStorageBlob `
-						-Blob       $task.blob `
-						-Container  $targetSaContainer `
-						-Context    $destinationContext `
-						-ErrorAction 'Stop' `
+						-Blob       	$task.blob `
+						-Container  	$targetSaContainer `
+						-Context    	$destinationContext `
+						-WarningAction	'SilentlyContinue' `
+						-ErrorAction	'Stop' ` `
 					| Get-AzStorageBlobCopyState
 				}
 				catch {
@@ -7273,7 +7485,8 @@ function new-disks {
 	$savedSub = $script:currentSub
 	set-context $targetSub # *** CHANGE SUBSCRIPTION **************
 
-	$token = (Get-AzAccessToken).Token
+	$secureToken= Get-AzAccessToken -AsSecureString -WarningAction 'SilentlyContinue'
+	$token = ConvertFrom-SecureString $secureToken.Token -AsPlainText
 
 	# get storage account ID
 	$blobsSaID = get-resourceString `
@@ -13204,17 +13417,21 @@ function new-storageAccount {
 			SkuName					= $SkuName
 			Kind					= $Kind
 			AccessTier				= $accessTier
-			AllowSharedKeyAccess	= $False
+			MinimumTlsVersion 		= 'TLS1_2'
+			AllowBlobPublicAccess	= $False
 			WarningAction			= 'SilentlyContinue'
 			ErrorAction				= 'SilentlyContinue'
+		}
+
+		if ($msInternalVersion) {
+			$param.AllowSharedKeyAccess		= $False
+			$param.PublicNetworkAccess 		= 'Enabled'
+			$param.NetworkRuleSet 			= @{defaultAction	= 'Deny'}
 		}
 
 		if ($fileStorage) {
 			$param.DnsEndpointType			= 'Standard'
 			$param.PublicNetworkAccess 		= 'Disabled'
-			$param.MinimumTlsVersion 		= 'TLS1_2'
-			$param.AllowBlobPublicAccess	= $False
-			$param.NetworkRuleSet 			= @{defaultAction	= 'Deny'}
 			if ($nfsQuotaGiB -gt 5120) {
 				$param.EnableLargeFileShare	= $True
 			}
@@ -15624,7 +15841,7 @@ function test-copyMode {
 		'setVmMerge'
 		# 'setVmName'
 		# 'renameDisks'
-		'allowExistingDisks'
+		# 'allowExistingDisks'
 # Update Mode
 		'updateMode'
 		'deleteSnapshotsAll'
@@ -17834,6 +18051,29 @@ function add-az_publicIPAddresses {
 #--------------------------------------------------------------
 	foreach ($az_res in $script:az_publicIPAddresses) {
 
+		$ipTags = @()
+		# copy existing IP tags
+		if ('setIpTag' -notin $boundParameterNames) {
+			foreach ($tag in $az_res.IpTags) {
+				if ($tag.Tag.Length) {
+					$ipTags += @{
+						ipTagType	= $tag.IpTagType
+						tag			= $tag.Tag
+					}
+				}
+			}
+		}
+
+		# create new IP tag
+		if ($setIpTag.length -ne 0) {
+			$ipTags = @(
+				@{
+					ipTagType	= $setIpTagType
+					tag			= $setIpTag
+				}
+			)
+		}
+
 		# create resource
 		$resource = @{
 			type 				= 'Microsoft.Network/publicIPAddresses'
@@ -17845,6 +18085,7 @@ function add-az_publicIPAddresses {
 				publicIPAddressVersion		= $az_res.PublicIpAddressVersion -as [string]
 				publicIPAllocationMethod	= $az_res.PublicIpAllocationMethod -as [string]
 				idleTimeoutInMinutes		= $az_res.IdleTimeoutInMinutes
+				ipTags						= $ipTags
 			}
 		}
 
@@ -18678,6 +18919,11 @@ function step-copyBlobsAndSnapshots {
 	}
 
 	if ($blobCopyNeeded -and !$skipRemoteCopy) {
+		if ($restartRemoteCopy) {
+			add-ipRule
+			new-delegationToken
+			write-logFile
+		}
 		wait-copyBlobs
 		revoke-access
 	}
@@ -18879,48 +19125,36 @@ function step-cleanup {
 #-------------------------------------------------------------
 function step-patchMode {
 #-------------------------------------------------------------
-
-	write-logFileConfirm "Patch and Reboot VMs in resource group '$SourceRG'"
+	write-stepStart "Patching VMs"
 	get-shellScripts
 
-	if ($skipPatch) {
-		return
+	if (!$simulate) {
+		start-VMsParallel $sourceRG $patchVMs
 	}
-
-	#-------------------------------------------------------------
-	write-stepStart "Patching LINUX VMs"
 	
 	foreach ($vmName in $patchVMs) {
-		if ($script:copyVMs[$vmName].OsDisk.osType -eq 'linux') {
-			$script:linuxVMs += $vmName
-		}
-		else {
-			write-logFileWarning "VM '$vmName' skipped because it is not a Linux VM"
-		}
-	}
-
-	if (!$simulate) {
-		start-VMsParallel $sourceRG $script:linuxVMs
-	}
-	
-	foreach ($vmName in $script:linuxVMs) {
+			$osType = $script:copyVMs[$vmName].OsDisk.OsType
 			write-logFile
 			write-logFile (Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz') -ForegroundColor 'DarkGray'
 			write-logfile '----------------------------------------------------------------------'
-			write-logfile "Patch VM '$vmName'"
+			write-logfile "Patch VM '$vmName' ($osType)"
 	
 			if (!$simulate) {
-				new-scriptPatch $vmName
+				if ($script:copyVMs[$vmName].OsDisk.osType -eq 'linux') {
+					new-scriptPatch $vmName -Linux
+				}
+				else {
+					new-scriptPatch $vmName -Windows
+				}
 			}
 	}
 	write-logFile
 
-	if ($script:linuxVMs.count -eq 0) {
-		write-logFileWarning "No Linux VMs to patch"
+	if ($patchVMs.count -eq 0) {
+		write-logFileWarning "No VMs to patch"
 	}
 	else {
-		write-logfile "Waiting 30 seconds for patches to finish..."
-		Start-Sleep -seconds 30
+		write-logFileWarning "OS patches might still be installing"
 	}
 	write-stepEnd
 }
@@ -18929,20 +19163,30 @@ function step-patchMode {
 function new-scriptPatch {
 #--------------------------------------------------------------
 	param (
-		$vmName
+		$vmName,
+		[switch] $Linux,
+		[switch] $Windows
 	)
 
-	invoke-patchScript $sourceRG $vmName $script:blockPatch
+	if ($Windows) {
+		invoke-patchScript $sourceRG $vmName $script:WindowsPatchScript 'RunPowerShellScript'
+		
+	}
 
-	if ($script:ZYPPER_EXIT_INF_RESTART_NEEDED -eq $True) {
-
-		write-logfile
-		write-logfile "Waiting 30 seconds on reboot..."
-		write-logfile
-		Start-Sleep -seconds 30
-
-		invoke-patchScript $sourceRG $vmName $script:blockPatch
-		$script:ZYPPER_EXIT_INF_RESTART_NEEDED = $False
+	elseif ($Linux) {
+		invoke-patchScript $sourceRG $vmName $script:LinuxPatchScript 'RunShellScript'
+	
+		# second try for ZYPPER
+		if ($script:ZYPPER_EXIT_INF_RESTART_NEEDED -eq $True) {
+	
+			write-logfile
+			write-logfile "Waiting 30 seconds on reboot..."
+			write-logfile
+			Start-Sleep -seconds 30
+	
+			invoke-patchScript $sourceRG $vmName $script:LinuxPatchScript 'RunShellScript'
+			$script:ZYPPER_EXIT_INF_RESTART_NEEDED = $False
+		}
 	}
 }
 
@@ -18952,14 +19196,15 @@ function invoke-patchScript {
 	param (
 		$resourceGroup,
 		$scriptVm,
-		$scriptText
+		$scriptText,
+		$commandId = 'RunShellScript'
 	)
 
 	# script parameters
 	$parameter = @{
 		ResourceGroupName 	= $resourceGroup
 		VMName            	= $scriptVM
-		CommandId         	= 'RunShellScript'
+		CommandId         	= $commandId
 		ScriptString 		= $scriptText
 		ErrorAction			= 'SilentlyContinue'
 	}
@@ -19015,11 +19260,48 @@ function get-shellScripts {
 	}
 
 #--------------------------------------------------------------
-# install patches (running on VM1 and VM2)
+# Windows patches
+#--------------------------------------------------------------
+	$category = ''
+	if (!$patchAll) {
+		$category = " -Category 'Security Updates' "
+	}
+
+	$logDir  = "C:\Packages\Plugins\RGCOPY"
+	$logFile = "C:\Packages\Plugins\RGCOPY\RGCOPY_WindowsUpdate_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')"
+
+	$script:WindowsPatchScript = @"
+New-Item '$logDir' -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Install-PackageProvider -Name NuGet -Force *>>'$logFile'
+Install-Module -Name PSWindowsUpdate -Force *>>'$logFile'
+Import-Module PSWindowsUpdate *>>'$logFile'
+
+Get-WUInstallerStatus | Format-Table
+Get-WURebootStatus | Format-Table
+Get-WULastResults | Format-Table
+
+Write-Host 'Last 10 updates:'
+Get-WUHistory -Last 10 | Format-Table
+
+Write-Host 'Starting updates as job and reboot...'
+
+`$string = @'
+	Import-Module PSWindowsUpdate
+	Get-WindowsUpdate -MicrosoftUpdate -Install $category -AcceptAll -AutoReboot *>>'$logFile'
+'@
+
+`$script = [Scriptblock]::Create(`$string)
+Start-Job -ScriptBlock `$script *>>'$logFile'
+"@
+
+#--------------------------------------------------------------
+# Linux patches
 #--------------------------------------------------------------
 # runs as script.sh
 # header file not used. Only parameter patchSecurity is used.
-	$script:blockPatch = 
+	$script:LinuxPatchScript = 
 @"
 #!/bin/bash
 patchSecurity=$patchSecurity
@@ -19384,7 +19666,14 @@ function new-vmExtension {
 		[switch] $autoUpgradePossible
 	)
 
-	if ($extensionName -in $script:existingExtensions) {
+	$found = $False
+	foreach ($existingExtension in $script:existingExtensions) {
+		if ($existingExtension -like "*$extensionName*") {
+			$found = $True
+		}
+	}
+
+	if ($found) {
 		write-logFileUpdates 'extensions' $extensionName 'keep'
 		return
 	}
@@ -19488,7 +19777,7 @@ else {
 Clear-Host
 $error.Clear()
 $pref = (get-Item 'Env:\rgcopyBreakingChangeWarnings' -ErrorAction 'SilentlyContinue').value
-if ($Null -eq $pref )	{
+if ($pref -ne 'True')	{
 	Set-Item Env:\SuppressAzurePowerShellBreakingChangeWarnings "true"
 }
 
@@ -19868,7 +20157,15 @@ try {
 		write-logFileError "Source Subscription '$sourceSub' not found" -lastError
 	}
 	# Check Source Resource Group
-	$sourceLocation = (Get-AzResourceGroup -Name $sourceRG -ErrorAction 'SilentlyContinue').Location
+	$sourceRgObject = Get-AzResourceGroup -Name $sourceRG -ErrorAction 'SilentlyContinue'
+	# tag names are case insensitive
+	$tagName = $sourceRgObject.Tags.Keys | Where-Object {$_ -eq 'Owner'}
+	# result of (Get-AzResourceGroup).Tags.Keys is case sensitive
+	if (($Null -ne $tagName) -and ($Null -ne $sourceRgObject)) {
+		$rgOwner = $sourceRgObject.Tags.$tagName
+	}
+
+	$sourceLocation = $sourceRgObject.Location
 	$sourceRgNotFound = ''
 
 	if ($Null -eq $sourceLocation) {
@@ -19889,6 +20186,7 @@ try {
 	}
 	write-logFile 'Source:'
 	write-logFileTab 'Subscription'		$sourceSub
+	write-logFileTab 'SubscriptionID'	$sourceSubID
 	write-logFileTab 'User'				$sourceSubUser
 	write-logFileTab 'Tenant'			$sourceSubTenant -noColor
 	write-logFileTab 'Region'			$sourceLocation -noColor
@@ -19920,9 +20218,11 @@ try {
 		}
 		if ($targetSub -eq $sourceSub) {
 			write-logFileTab 'Subscription' 'ditto' -noColor
+			write-logFileTab 'SubscriptionID' 'ditto' -noColor
 		}
 		else {
 			write-logFileTab 'Subscription' $targetSub
+			write-logFileTab 'SubscriptionID' $targetSubID
 		}
 		
 		# Target User
@@ -20091,31 +20391,50 @@ try {
 	elseif ($patchMode) {
 		test-patchMode
 		get-sourceVMs
+		write-logFileConfirm "Patch and Reboot VMs in resource group '$SourceRG'"
+		
+		# check RG Owner tag
+		if ($Null -eq $rgOwner) {
+			write-logFileWarning "Owner tag of resource group '$sourceRG' was not set" `
+								"setting it to '$setOwner'"
+			$tags = $sourceRgObject.Tags
+			$tags += @{Owner = $setOwner}
+			Set-AzResourceGroup -Name $sourceRG -Tag $tags -ErrorAction 'SilentlyContinue' | Out-Null
+			test-cmdlet 'Set-AzResourceGroup'  "Could not set tag to resource group '$sourceRG'"
+		}
+		elseif ($rgOwner -ne $setOwner) {
+			write-logFileWarning "Owner tag of resource group '$sourceRG' is not set to '$setOwner'" `
+								"Current value is '$rgOwner'"
+		}
 
-		$script:linuxVMs = @()
+		# install OS patches
 		$script:patchesFailed = 0
-		step-patchMode
+		if (!$skipPatch) {
+			step-patchMode
+		}
 
+		# install VM extensions
 		$script:vmsWithNewExtension  = @()
 		if ($forceExtensions -and $msInternalVersion) {
 			step-patchExtensions
 			show-vmExtensions
 		}
 
-		$vmsToStop = ($script:linuxVMs + $script:vmsWithNewExtension) | Sort-Object -Unique
-
+		# stop VMs
 		if (!$stopVMsSourceRG) {
 			write-logFileWarning "VMs in resource group '$sourceRG' have not been stopped" `
 								"Use parameter 'stopVMsSourceRG' the next time"
 		}
 		else {
 			write-stepStart "Stopping VMs"
-			stop-VMsParallel $sourceRG $vmsToStop
+			stop-VMsParallel $sourceRG $patchVMs
 		}
 
+		# display failed OS patches
 		if ($script:patchesFailed -gt 0) {
-			write-logFileError "Linux patches of $($script:patchesFailed) VMs failed"
+			write-logFileError "Patches of $($script:patchesFailed) VMs failed"
 		}
+
 		write-zipFile 0
 	}
 	
@@ -20174,9 +20493,7 @@ try {
 	if (($sourceSubUser   -ne $targetSubUser) `
 	-or ($sourceSubTenant -ne $targetSubTenant)) {
 
-		if (!$msInternalVersion) {
-			$RemoteCopyNeeded = $True
-		}
+		$RemoteCopyNeeded = $True
 	}
 
 	if (!$RemoteCopyNeeded) {

@@ -1,6 +1,6 @@
 # RGCOPY documentation
 ***
-**Version: 0.9.64<BR>May 2024**
+**Version: 0.9.65<BR>September 2024**
 ***
 
 ### Introduction
@@ -150,6 +150,8 @@ same az-user / same region|same az-user / different region|different az-user
 
 \* Normally, a full snapshot is used. For `UltraSSD_LRS` and `PremiumV2_LRS` an incremental snapshot is used instead.
 
+> :warning: **Warning:** RGCOPY uses the same name for incremental and full snapshots. When copying to a different region, an existing full snapshot cannot be used. Creating new snapshots can break parallel running RGCOPY runs that use the same source RG.
+
 You can further change the behavior by setting the following parameters:
 
  parameter|[DataType]: usage
@@ -263,7 +265,7 @@ The following resource configuration parameters exist:
 parameter|usage (data type is always [string] or [array])
 :---|:---
 **`setVmSize`** =<BR>`@("size@vm1,vm2,...", ...)`	|Set VM Size: <ul><li>**size**: VM size (e.g. Standard_E32s_v3) </li><li>**vm**: VM name</li></ul> 
-**`setDiskSku`** =<BR>`@("sku@disk1,disk2,...", ...)`			|Set Disk SKU (default value is **Premium_LRS**):  <ul><li>**sku** in {`Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`, `PremiumV2_LRS`, `UltraSSD_LRS`} </li><li>**disk**: disk name</li></ul> :memo: **Note:** There are several restrictions:<ul><li> Converting **from** `PremiumV2_LRS` or `UltraSSD_LRS` requires incremental snapshots. RGCOPY does not support incremental snapshots if there already exists another incremental snapshot (not created by RGCOPY). Creating an 1TB disk from an incremental snapshot can take more then 1 hour.</li><li> Converting **to** `PremiumV2_LRS` or `UltraSSD_LRS` requires a zonal deployment. Therefore, parameter `setVmZone` must be used. </li><li> Converting **from** `PremiumV2_LRS` or `UltraSSD_LRS` to a different SKU is only possible if the logical sector size is 512.</li><li>When converting from a different SKU **to** `PremiumV2_LRS` or `UltraSSD_LRS`, the logical sector size is set to 512.</li></ul>:warning: **Warning:** If you want to avoid using the default value then you must explicitly <BR>set **setDiskSku = $Null**.
+**`setDiskSku`** =<BR>`@("sku@disk1,disk2,...", ...)`			|Set Disk SKU (default value is **`Premium_LRS`**).<BR>When setting to `false` (or `$False` or `$Null`), the disk SKU is not changed.<ul><li>**sku** in {`Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`, `PremiumV2_LRS`, `UltraSSD_LRS`, `false`} </li><li>**disk**: disk name</li></ul> :memo: **Note:** There are several restrictions:<ul><li> Converting **from** `PremiumV2_LRS` or `UltraSSD_LRS` requires incremental snapshots. Creating an 1TB disk from an incremental snapshot can take more then 1 hour.</li><li> Converting **to** `PremiumV2_LRS` or `UltraSSD_LRS` requires a zonal deployment. Therefore, parameter `setVmZone` must be used. </li><li> Converting **from** `PremiumV2_LRS` or `UltraSSD_LRS` to a different SKU is only possible if the logical sector size is 512.</li><li>When converting from a different SKU **to** `PremiumV2_LRS` or `UltraSSD_LRS`, the logical sector size is set to 512.</li><li>If the VM size does not support premium IO then the disk SKU is automatically adopted. For example, `Premium_ZRS` is converted to `StandardSSD_ZRS`.</li></ul>
 **`setDiskIOps`** = <BR>`@("iops@disk1,disk1,...", ...)`|Set Disk IOps: <ul><li>**iops**: maximum IOs per second</li><li>**disk**: disk name</li></ul>:memo: **Note:** This parameter only works for Premium V2 disks. It cannot be used for Ultra SSD disks.
 **`setDiskMBps`** = <BR>`@("mbps@disk1,disk1,...", ...)`|Set Disk MBps: <ul><li>**mbps**: maximum MB per second</li><li>**disk**: disk name</li></ul>:memo: **Note:** This parameter only works for Premium V2 disks. It cannot be used for Ultra SSD disks.
 **`setDiskSize`** = <BR>`@("size@disk1,disk1,...", ...)`			|Set Disk Size: <ul><li>**size** in GB </li><li>**disk**: disk name</li></ul> :warning: **Warning:** It's only possible to *increase* the size of a disk. Partitions on the disk are not changed. This parameter was originally intended for increasing disk I/O on the target RG. Nowadays, you better should use parameter `setDiskTier` instead.
@@ -340,7 +342,7 @@ RGCOPY can change Availability Zones, Availability Sets and Proximity Placement 
 
 parameter|[DataType]: usage
 :---|:---
-**`setVmZone`** = <BR>`@("zone@vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 1, 2, 3} </li><li>**vm**: VM name </li></ul>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone information<BR>:bulb: **Tip:** Disks are always created in the same zone as their VMs. Detached disks are only copied when parameter `copyDetachedDisks` was set. In this case, the detached disks are created in the zone that is defined by parameter **`defaultDiskZone`** (with default value 0).
+**`setVmZone`** = <BR>`@("zone@vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 0, 1, 2, 3, false} </li><li>**vm**: VM name </li></ul>The default value is '0' which removes the zone configuration.<BR>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone configuration. When setting to 'false', the existing zone is not changed.<BR>:bulb: **Tip:** Disks are always created in the same zone as their VMs. Detached disks are only copied when parameter `copyDetachedDisks` was set. In this case, the detached disks are created in the zone that is defined by parameter **`defaultDiskZone`** (with default value 0).
 **`setVmFaultDomain`** = <BR>`@("fault@vm1,vm2,...", ...)`			|Set VM Fault Domain: <ul><li>**fault**: Used Fault Domain in {none, 0, 1, 2} </li><li>**vm**: VM name </li></ul>:bulb: **Tip:**  The value 'none' removes the Fault Domain configuration from the VM.<BR>:warning: **Warning:** Values {0, 1, 2} are only allowed if the VM is part of a VMSS Flex.
 **`skipVmssFlex`**|**[switch]**: do not copy existing VM Scale Sets Flexible. <BR>Hereby, the target RG does not contain any VM Scale Set.
 **`skipAvailabilitySet`**|**[switch]**: do not copy existing Availability Sets. <BR>Hereby, the target RG does not contain any Availability Set.
@@ -455,6 +457,8 @@ parameter|[DataType]: usage
 
 ***
 ## File Copy of NetApp Volumes
+
+> :warning: **Warning:** File Copy of NetApp Volumes is a deprecated feature of RGCOPY. It will not be tested anymore. **It might or might not work in the future**. There will be no bug fixes for the RGCOPY file copy feature.
 
 In Azure, you cannot export the snapshot of a NetApp volume to a BLOB or restore it in another region. Therefore, RGCOPY cannot directly copy NetApp volumes. However, RGCOPY supports NetApp volumes on LINUX using file copy (rather than disk or volume copy). Hereby, the following scenarios are possible:
 
