@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.65
-version date:     September 2024
+version:          0.9.66
+version date:     December 2024
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 
@@ -232,6 +232,7 @@ param (
 	,[switch] $skipBastion									# do not copy Bastion
 	,[switch] $skipBootDiagnostics							# do not create Boot Diagnostics (managed storage account)
 	,[switch] $skipIdentities								# do not copy user assigned identities
+	,[switch] $skipNatGateway
 
 	#--------------------------------------------------------------
 	# resource configuration parameters
@@ -890,7 +891,14 @@ function write-logFile {
 
 	# write to log file
 	if (!$NoNewLine) {
-		Write-Host $script:LogFileLine *>>$logPath
+		try {
+			$script:LogFileLine | Out-File $logPath -Append
+		}
+		catch {
+			Start-Sleep 1
+			# one retry (if file is opened by virus scanner)
+			$script:LogFileLine | Out-File $logPath -Append
+		}
 		[string] $script:LogFileLine = ''
 	}
 }
@@ -932,7 +940,8 @@ function write-logFileWarning {
 		$param3,
 		$param4,
 		$stopCondition,
-		[switch] $stopWhenForceVmChecks
+		[switch] $stopWhenForceVmChecks,
+		[switch] $noSkip
 	)
 
 	# write error
@@ -955,7 +964,7 @@ function write-logFileWarning {
 	if ($param3.length -ne 0) { write-logFile $param3 }
 	if ($param4.length -ne 0) { write-logFile $param4 }
 	# new line
-	if ($param2.length -ne 0) { write-logFile }
+	if (($param2.length -ne 0) -and !$noSkip) { write-logFile }
 }
 
 #--------------------------------------------------------------
@@ -1081,13 +1090,11 @@ function write-logFileError {
 		[switch] $lastError
 	)
 
-	if ($lastError) {
-		write-logFile
-		write-logFile $error[0] -ForegroundColor 'Red'
-	}
 	write-logFile
 	write-logFile ('=' * 60) -ForegroundColor 'DarkGray'
+
 	write-logFile $param1 -ForegroundColor 'yellow'
+
 	if ($param2.length -ne 0) {
 		write-logFile $param2 -ForegroundColor 'yellow'
 	}
@@ -1097,6 +1104,18 @@ function write-logFileError {
 	if ($param4.length -ne 0) {
 		write-logFile $param4 -ForegroundColor 'yellow'
 	}
+
+	if ($lastError) {
+		$i = $error.count
+		write-logFile
+		write-logFile "messages, not necessarily errors:"
+		foreach ($line in $error) {
+			write-logFile -ForegroundColor 'DarkGray' "----- message number $i -----"
+			write-logFile -ForegroundColor 'DarkGray' ($line -as [string])
+			$i = $i -1
+		}
+	}
+
 	write-logFile ('=' * 60) -ForegroundColor 'DarkGray'
 	write-logFile
 
@@ -1108,7 +1127,7 @@ function write-logFileError {
 	}
 	write-logFile "            $("{0,5}" -f $stack[1].ScriptLineNumber)  $($stack[1].Command)"
 	write-logFile
-	write-logFile "ERROR MESSAGE: $param1"
+	write-logFile "ERROR MESSAGE: $param1" -ForegroundColor 'red'
 	write-zipFile 1
 }
 
@@ -3159,23 +3178,26 @@ function show-sourceVMs {
 	| write-LogFilePipe
 
 	write-stepEnd
-	write-stepStart "Copy method for disks" -skipLF
 
-	$script:copyDisks.Values
-	| Where-Object Skip -ne $True
-	| Sort-Object Name
-	| Select-Object `
-		@{label="Disk Name"; expression={get-shortOutput $_.Name 30}}, `
-		@{label="Swap"; expression={get-shortOutput $_.SwapName 20}}, `
-		@{label="Gen"; expression={get-replacedOutput $_.HyperVGeneration ''}}, `
-		@{label="NVMe"; expression={get-replacedOutput $_.DiskControllerType ''}}, `
-		@{label="Sektor"; expression={get-replacedOutput $_.LogicalSectorSize $Null}}, `
-		@{label="SecurityType"; expression={get-replacedOutput $_.SecurityType ''}}, `
-		DiskCreationMethod
-	| Format-Table
-	| write-LogFilePipe
-
-	write-stepEnd
+	if ($rgcopyMode	-ne 'Patch Mode') {
+		write-stepStart "Copy method for disks" -skipLF
+	
+		$script:copyDisks.Values
+		| Where-Object Skip -ne $True
+		| Sort-Object Name
+		| Select-Object `
+			@{label="Disk Name"; expression={get-shortOutput $_.Name 30}}, `
+			@{label="Swap"; expression={get-shortOutput $_.SwapName 20}}, `
+			@{label="Gen"; expression={get-replacedOutput $_.HyperVGeneration ''}}, `
+			@{label="NVMe"; expression={get-replacedOutput $_.DiskControllerType ''}}, `
+			@{label="Sektor"; expression={get-replacedOutput $_.LogicalSectorSize $Null}}, `
+			@{label="SecurityType"; expression={get-replacedOutput $_.SecurityType ''}}, `
+			DiskCreationMethod
+		| Format-Table
+		| write-LogFilePipe
+	
+		write-stepEnd
+	}
 }
 
 #--------------------------------------------------------------
@@ -5994,64 +6016,7 @@ function update-paramSetDiskIOps {
 		}
 		get-ParameterRule
 	}
-
-	# output of changes
-	$script:copyDisks.values
-	| Where-Object Skip -ne $True
-	| Sort-Object Name
-	| ForEach-Object {
-
-		$diskName = $_.Name
-		$SkuName = $_.SkuName
-		$SizeGB = $_.SizeGB
-
-		$current = $_.DiskIOPSReadWrite
-		$wanted  = $_.DiskIOPSReadWriteNew
-		if ($Null -eq $wanted) {
-			$wanted = $current
-		}
-
-		# check SKU
-		if (($SkuName -notin @('PremiumV2_LRS', 'UltraSSD_LRS')) -and ($wanted -ne 0)) {
-			write-logFileWarning "You cannot set IOps for disk '$diskName' to '$wanted' because its sku is '$SkuName'"
-			$wanted = 0
-		}
-
-		# check size
-		if ($SkuName -in @('PremiumV2_LRS')) {
-			$min = 3000
-			$max = ($sizeGB - ($SizeGB % 2)) / 2 * 1000
-			if ($max -gt 80000) {
-				$max = 80000
-			}
-			if ($max -lt $min) {
-				$max = $min
-			}
-
-			if ($wanted -lt $min) {
-				write-logFileWarning "Correcting IOps for disk '$diskName' from $wanted to minimum value $min"
-				$wanted = $min
-			}
-			elseif ($wanted -gt $max) {
-				write-logFileWarning "Correcting IOps for disk '$diskName' from $wanted to maximum value $max"
-				$wanted = $max
-			}
-		}
-		elseif ($SkuName -in @('UltraSSD_LRS')) {
-			# parameter validity not checked yet for UltraSSD_LRS
-		}
-
-		# update
-		if ($current -ne $wanted) {
-			$_.DiskIOPSReadWrite = $wanted
-			write-logFileUpdates 'disks' $diskName "set disk IOps" $_.DiskIOPSReadWrite
-		}
-		else {
-			write-logFileUpdates 'disks' $diskName "keep disk IOps" $_.DiskIOPSReadWrite
-		}
-	}
 }
-
 
 #--------------------------------------------------------------
 function update-paramSetDiskMBps {
@@ -6071,62 +6036,198 @@ function update-paramSetDiskMBps {
 		}
 		get-ParameterRule
 	}
+}
 
-	# output of changes
+#--------------------------------------------------------------
+function update-diskMBpsAndIOps {
+#--------------------------------------------------------------
+
+	$script:copyDisks.values
+	| Where-Object {($_.SkuName -notlike 'PremiumV2*') -and ($_.SkuName -notlike 'UltraSSD*')}
+	| ForEach-Object {
+
+		$_.DiskIOPSReadWrite = 0
+		$_.DiskMBpsReadWrite = 0
+	}
+
 	$script:copyDisks.values
 	| Where-Object Skip -ne $True
+	| Where-Object {($_.SkuName -like 'PremiumV2*') -or ($_.SkuName -like 'UltraSSD*')}
 	| Sort-Object Name
 	| ForEach-Object {
 
 		$diskName = $_.Name
 		$SkuName = $_.SkuName
-		$DiskIOPSReadWrite = $_.DiskIOPSReadWrite
+		$SizeGB = $_.SizeGB
 
-		$current = $_.DiskMBpsReadWrite
-		$wanted  = $_.DiskMBpsReadWriteNew
-		if ($Null -eq $wanted) {
-			$wanted = $current
+		# wanted IOPS
+		$currentIOPS = $_.DiskIOPSReadWrite
+		if (!($currentIOPS -gt 0)) {
+			$currentIOPS = 0
+		}
+		$wantedIOPS  = $_.DiskIOPSReadWriteNew
+		if ($Null -eq $wantedIOPS) {
+			$wantedIOPS = $currentIOPS
 		}
 
-		# check SKU
-		if (($SkuName -notin @('PremiumV2_LRS', 'UltraSSD_LRS')) -and ($wanted -ne 0)) {
-			write-logFileWarning "You cannot set MBps for disk '$diskName' to '$wanted' because its sku is '$SkuName'"
-			$wanted = 0
+		# wanted MBPS
+		$currentMBPS = $_.DiskMBpsReadWrite
+		if (!($currentMBPS -gt 0)) {
+			$currentMBPS = 0
+		}
+		$wantedMBPS  = $_.DiskMBpsReadWriteNew
+		if ($Null -eq $wantedMBPS) {
+			$wantedMBPS = $currentMBPS
 		}
 
-		# check size
-		if ($SkuName -in @('PremiumV2_LRS')) {
-			$min = 125
-			$max = ($DiskIOPSReadWrite - ($DiskIOPSReadWrite % 4)) / 4
-			if ($max -gt 1200) {
-				$max = 1200
-			}
-			if ($max -lt $min) {
-				$max = $min
-			}
-
-			if ($wanted -lt $min) {
-				write-logFileWarning "Correcting MBps for disk '$diskName' from $wanted to minimum value $min"
-				$wanted = $min
-			}
-			elseif ($wanted -gt $max) {
-				write-logFileWarning "Correcting MBps for disk '$diskName' from $wanted to maximum value $max"
-				$wanted = $max
-			}
-		}
-		elseif ($SkuName -in @('UltraSSD_LRS')) {
-			# parameter validity not checked yet for UltraSSD_LRS
+		# get minimum required IOPS for given MBPS
+		$requiredIOPS = get-requiredIOPS $wantedMBPS
+		if ($wantedIOPS -lt $requiredIOPS) {
+			write-logFileWarning "Increasing IOps for disk '$diskName' to $requiredIOPS" `
+								 "  (needed for requested $wantedMBPS MB/sec)" -noSkip
+			$wantedIOPS = $requiredIOPS
 		}
 
-		# update
-		if ($current -ne $wanted) {
-			$_.DiskMBpsReadWrite = $wanted
-			write-logFileUpdates 'disks' $diskName "set disk MBps" $_.DiskMBpsReadWrite
+		# correct IOPS
+		$wantedIOPS = get-IOPS $wantedIOPS  $diskName  $SkuName $SizeGB
+		$_.DiskIOPSReadWrite = $wantedIOPS
+		if ($currentIOPS -ne $wantedIOPS) {
+			write-logFileUpdates 'disks' $diskName "set disk IOps" $wantedIOPS
 		}
 		else {
-			write-logFileUpdates 'disks' $diskName "keep disk MBps" $_.DiskMBpsReadWrite
+			write-logFileUpdates 'disks' $diskName "keep disk IOps" $wantedIOPS
+		}
+
+		# corrected MBPS
+		$wantedMBPS = get-MBPS $wantedMBPS  $diskName  $SkuName $wantedIOPS
+		$_.DiskMBpsReadWrite = $wantedMBPS
+		if ($currentMBPS -ne $wantedMBPS) {
+			write-logFileUpdates 'disks' $diskName "set disk MBps" $wantedMBPS
+		}
+		else {
+			write-logFileUpdates 'disks' $diskName "keep disk MBps" $wantedMBPS
 		}
 	}
+}
+
+#-------------------------------------------------------------
+function get-requiredIOPS {
+#-------------------------------------------------------------
+	param (
+		[int] $wantedMBPS
+	)
+
+	# maximum 0.25 MB/s per set IOPS
+	$requiredIOPS = $wantedMBPS * 4
+
+	return $requiredIOPS
+}
+
+#-------------------------------------------------------------
+function get-IOPS {
+#-------------------------------------------------------------
+	param (
+		[int] $wanted,
+		[string] $diskname,
+		[string] $diskSKU,
+		[int] $sizeGB
+	)
+
+	# UltraSSD
+	if ($diskSKU -like 'UltraSSD*') {
+		# minimum:
+		$min = $sizeGB
+		if ($min -lt 100) {
+			$min = 100
+		}
+
+		# calculated maximum:
+		$max = $sizeGB * 300
+
+		# absolute maximum
+		if ($max -gt 400000) {
+			$max = 400000
+		}
+	}
+
+	# PremiumV2
+	else {
+		# minimum:
+		$min = 3000
+
+		# calculated maximum:
+		$max = $sizeGB  * 500
+
+		# absolute maximum
+		if ($max -gt 80000) {
+			$max = 80000
+		}
+	}
+	
+	if ($wanted -lt $min) {
+		write-logFileWarning "Correcting IOps for disk '$diskname' from $wanted to minimum value $min"
+		$wanted = $min
+	}
+	elseif ($wanted -gt $max) {
+		write-logFileWarning "Correcting IOps for disk '$diskname' from $wanted to maximum value $max" `
+							"  (you might have to increase disk size)" -noSkip
+		$wanted = $max
+	}
+
+	return $wanted
+}
+
+#-------------------------------------------------------------
+function get-MBPS {
+#-------------------------------------------------------------
+	param (
+		[int] $wanted,
+		[string] $diskname,
+		[string] $diskSKU,
+		[int] $DiskIOPSReadWrite
+	)
+
+	# UltraSSD
+	if ($diskSKU -like 'UltraSSD*') {
+		# minimum:
+		$min = 1
+
+		# calculated maximum:
+		# 0.25 MB/s per set IOPS (rounded off to full MBPS)
+		$max = ($DiskIOPSReadWrite - ($DiskIOPSReadWrite % 4)) / 4
+
+		# absolute maximum
+		if ($max -gt 10000) {
+			$max = 10000
+		}
+	}
+
+	# PremiumV2
+	else {
+		# minimum:
+		$min = 125
+	
+		# calculated maximum:
+		# 0.25 MB/s per set IOPS (rounded off to full MBPS)
+		$max = ($DiskIOPSReadWrite - ($DiskIOPSReadWrite % 4)) / 4
+
+		# absolute maximum
+		if ($max -gt 1200) {
+			$max = 1200
+		}
+	}
+
+	if ($wanted -lt $min) {
+		write-logFileWarning "Correcting MBps for disk '$diskname' from $wanted to minimum value $min"
+		$wanted = $min
+	}
+	elseif ($wanted -gt $max) {
+		write-logFileWarning "Correcting MBps for disk '$diskname' from $wanted to maximum value $max" `
+							"  (you might have to increase IOps of disk and/or disk size)" -noSkip
+		$wanted = $max
+	}
+
+	return $wanted
 }
 
 #--------------------------------------------------------------
@@ -6951,6 +7052,12 @@ function add-ipRule {
 	write-logFile "Granting access to storage account '$targetSA' for public IP $ip ..."
 	write-logFileWarning "All VPN connections must be closed"
 
+	$vpns = get-vpnConnection -ErrorAction 'SilentlyContinue'
+	$connectedVpns = ($vpns | Where-Object ConnectionStatus -eq 'Connected').Name
+	if ($Null -ne $connectedVpns) {
+		write-logFileError "Connected to VPN '$($connectedVpns -as [string])'"
+	}
+
 	Add-AzStorageAccountNetworkRule `
 		-ResourceGroupName	$targetRG `
 		-Name 				$targetSA `
@@ -6959,6 +7066,9 @@ function add-ipRule {
 	test-cmdlet 'Add-AzStorageAccountNetworkRule'  "Granting access to storage account '$targetSA' for public IP $ip failed"
 
 	set-context $savedSub # *** CHANGE SUBSCRIPTION **************
+
+	# wait before creating delegation token
+	Start-Sleep -Seconds 10
 }
 
 #--------------------------------------------------------------
@@ -6979,8 +7089,8 @@ function new-delegationToken {
 				-ErrorAction			'SilentlyContinue'
 	test-cmdlet 'New-AzStorageContext'  "Getting Context for storage account '$targetSA' failed"
 
-	$StartTime = Get-Date
-	$EndTime = $startTime.AddDays(7)
+	$StartTime = (Get-date).ToUniversalTime()
+	$EndTime = $startTime.AddDays(6)
 
 	$script:delegationToken = New-AzStorageContainerSASToken `
 			-Name			$targetSaContainer `
@@ -7072,9 +7182,6 @@ function grant-access {
 				throw "'$SnapshotName' granting failed (Post)"
 			}
 
-			# wait for access SAS to get generated
-			Start-Sleep -Seconds 10
-
 			$restUri = ($response).Headers.Location
 
 			$invokeParam = @{
@@ -7125,10 +7232,14 @@ function grant-access {
 	#--------------------------------------------------------------
 	# start execution
 	write-stepStart "GRANT ACCESS TO SNAPSHOTS" $maxDOP
+
+	# add IP rule
 	add-ipRule
+
 	write-logFile
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 
+	# granting BLOB access in parallel
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
 	| Where-Object BlobCopy -eq $True
@@ -7139,8 +7250,9 @@ function grant-access {
 	if (!$?) {
 		write-logFileError "Grant Access to snapshot failed"
 	}
-
 	write-logFile
+
+	# create delegation token
 	new-delegationToken
 	write-stepEnd
 }
@@ -9265,9 +9377,10 @@ function update-paramAll {
 	update-paramSetDiskSize
 	update-paramSetDiskTier
 	update-paramSetDiskBursting
+	update-paramSetDiskMaxShares
 	update-paramSetDiskIOps
 	update-paramSetDiskMBps
-	update-paramSetDiskMaxShares
+	update-diskMBpsAndIOps
 
 	# 4. setDiskCaching
 	update-paramSetDiskCaching
@@ -13423,12 +13536,26 @@ function new-storageAccount {
 			ErrorAction				= 'SilentlyContinue'
 		}
 
+		#--------------------------------------------------------------
+		# storage account for BLOB copy
+		# currently: use delegation key and IP rule for RGCOPY MSFT version
+		# therefore, no open VPN connection allowed
+		#
+		# in the future: use Network security perimeter
 		if ($msInternalVersion) {
 			$param.AllowSharedKeyAccess		= $False
 			$param.PublicNetworkAccess 		= 'Enabled'
 			$param.NetworkRuleSet 			= @{defaultAction	= 'Deny'}
 		}
 
+		# use storage account key for RGCOPY OSS version
+		else {
+			$param.AllowSharedKeyAccess		= $True
+			$param.PublicNetworkAccess 		= 'Enabled'
+		}
+
+		#--------------------------------------------------------------
+		# storage account for file share (backup/restore)
 		if ($fileStorage) {
 			$param.DnsEndpointType			= 'Standard'
 			$param.PublicNetworkAccess 		= 'Disabled'
@@ -16763,6 +16890,40 @@ function update-sourceBastion {
 }
 
 #--------------------------------------------------------------
+function get-az_used {
+#--------------------------------------------------------------
+	if ($script:resourceIDs.count -eq 0) {
+		return @()
+	}
+
+	# parse first Id
+	$r = get-resourceComponents $script:resourceIDs[0]
+	$type = $r.mainResourceType
+
+	switch ($type) {
+		'publicIPPrefixes'			{ $ref = [ref] $script:az_publicIPPrefixes }
+		'publicIPAddresses'			{ $ref = [ref] $script:az_publicIPAddresses }
+		'networkSecurityGroups'		{ $ref = [ref] $script:az_networkSecurityGroups }
+		'natGateways'				{ $ref = [ref] $script:az_natGateways }
+		Default						{ write-logFileError 'Internal error' }
+	}
+
+	$usedResources = @()
+	foreach ($res in $ref.Value) {
+		if ($res.id -in $script:resourceIDs) {
+			$usedResources += $res
+		}
+		else {
+			$r = get-resourceComponents $res.id
+			$name = $r.mainResourceName
+			write-logFileWarning "Skip unused $type '$name'"
+		}
+	}
+
+	return $usedResources
+}
+
+#--------------------------------------------------------------
 function get-az_remote {
 #--------------------------------------------------------------
 	param (
@@ -16773,6 +16934,9 @@ function get-az_remote {
 	if ($Null -eq $id) {
 		return
 	}
+
+	# save resourceIDs
+	$script:resourceIDs += $id
 
 	# parse Id
 	$r = get-resourceComponents $id
@@ -16847,6 +17011,7 @@ function get-az_local {
 	)
 
 	$script:az_all = @()
+	$script:resourceIDs = @()
 	#--------------------------------------------------------------
 	# virtualMachines (collect only from source RG)
 	#--------------------------------------------------------------
@@ -16996,25 +17161,35 @@ function get-az_local {
 	$script:az_all += $script:az_virtualNetworks
 
 	if (!$cloneOrMergeMode) {
-		#--------------------------------------------------------------
-		# natGateways
-		#--------------------------------------------------------------
-		# after:virtualNetworks
-		write-logFile "Reading Gateways from resource group $sourceRG..."
-		$script:az_natGateways = @( 
-			Get-AzNatGateway `
-				-ResourceGroupName $sourceRG `
-				-ErrorAction 'SilentlyContinue'
-		)
-		test-cmdlet 'Get-AzNatGateway'  "Could not get Gateways of resource group $sourceRG"
-
-		foreach ($net in $script:az_virtualNetworks) {
-			foreach ($subnet in $net.subnets) {
-				get-az_remote $subnet.NatGateway.Id
-			}
+		if ($skipNatGateway) {
+			write-logFileWarning 'Skip NAT gateways'
 		}
+		else {
+			#--------------------------------------------------------------
+			# natGateways
+			#--------------------------------------------------------------
+			# after:virtualNetworks
+			write-logFile "Reading Gateways from resource group $sourceRG..."
+			$script:az_natGateways = @( 
+				Get-AzNatGateway `
+					-ResourceGroupName $sourceRG `
+					-ErrorAction 'SilentlyContinue'
+			)
+			test-cmdlet 'Get-AzNatGateway'  "Could not get Gateways of resource group $sourceRG"
+	
+			# collect used resources
+			$script:resourceIDs = @()
 
-		$script:az_all += $script:az_natGateways
+			foreach ($net in $script:az_virtualNetworks) {
+				foreach ($subnet in $net.subnets) {
+					get-az_remote $subnet.NatGateway.Id
+				}
+			}
+
+			# remove unused resources
+			$script:az_natGateways = (get-az_used)
+			$script:az_all += $script:az_natGateways
+		}
 	}
 
 	if (!$cloneOrMergeMode) {
@@ -17031,6 +17206,9 @@ function get-az_local {
 		)
 		test-cmdlet 'Get-AzPublicIpPrefix'  "Could not get Public IP Prefixes of resource group $sourceRG"
 
+		# collect used resources
+		$script:resourceIDs = @()
+
 		foreach ($gateway in $script:az_natGateways) { 
 			foreach ($prefix in $gateway.PublicIpPrefixes) {
 				get-az_remote $prefix.Id
@@ -17043,6 +17221,8 @@ function get-az_local {
 			}
 		}
 
+		# remove unused resources
+		$script:az_publicIPPrefixes = (get-az_used)
 		$script:az_all += $script:az_publicIPPrefixes
 	}
 
@@ -17060,6 +17240,9 @@ function get-az_local {
 			-ErrorAction 'SilentlyContinue'
 	)
 	test-cmdlet 'Get-AzPublicIPAddress'  "Could not get Public IP Addresses of resource group $sourceRG"
+
+	# collect used resources
+	$script:resourceIDs = @()
 
 	# get PublicIPs from other RGs
 	foreach ($nic in $script:az_networkInterfaces) { 
@@ -17086,6 +17269,8 @@ function get-az_local {
 		}
 	}
 
+	# remove unused resources
+	$script:az_publicIPAddresses = (get-az_used)
 	$script:az_all += $script:az_publicIPAddresses
 
 	if (!$cloneOrMergeMode) {
@@ -17102,6 +17287,9 @@ function get-az_local {
 		)
 		test-cmdlet 'Get-AzNetworkSecurityGroup'  "Could not get NSGs of resource group $sourceRG"
 
+		# collect used resources
+		$script:resourceIDs = @()
+
 		# get NSGs from other RGs
 		foreach ($net in $script:az_virtualNetworks) {
 			foreach ($subnet in $net.subnets) {
@@ -17113,6 +17301,8 @@ function get-az_local {
 			get-az_remote $nic.NetworkSecurityGroup.Id
 		}
 
+		# remove unused resources
+		$script:az_networkSecurityGroups = (get-az_used)
 		$script:az_all += $script:az_networkSecurityGroups
 	}
 
@@ -17940,9 +18130,12 @@ function add-az_virtualNetworks {
 				properties = @{
 					addressPrefix			= $sub.AddressPrefix[0]
 					networkSecurityGroup	= get-bicepIdStructById $sub.NetworkSecurityGroup.Id
-					natGateway				= get-bicepIdStructById $sub.NatGateway.Id
 					delegations				= $delegations
 				}
+			}
+
+			if (!$skipNatGateway) {
+				$subnet.properties.natGateway = get-bicepIdStructById $sub.NatGateway.Id
 			}
 
 			$subnets += $subnet
@@ -18051,11 +18244,21 @@ function add-az_publicIPAddresses {
 #--------------------------------------------------------------
 	foreach ($az_res in $script:az_publicIPAddresses) {
 
-		$ipTags = @()
-		# copy existing IP tags
-		if ('setIpTag' -notin $boundParameterNames) {
+		if ($setIpTag.length -ne 0) {
+			# create new IP tag
+			$ipTags = @(
+				@{
+					ipTagType	= $setIpTagType
+					tag			= $setIpTag
+				}
+			)
+		}
+
+		elseif ('setIpTag' -notin $boundParameterNames) {
+			# copy existing IP tags
+			$ipTags = @()
 			foreach ($tag in $az_res.IpTags) {
-				if ($tag.Tag.Length) {
+				if ($tag.Tag.Length -ne 0) {
 					$ipTags += @{
 						ipTagType	= $tag.IpTagType
 						tag			= $tag.Tag
@@ -18064,14 +18267,9 @@ function add-az_publicIPAddresses {
 			}
 		}
 
-		# create new IP tag
-		if ($setIpTag.length -ne 0) {
-			$ipTags = @(
-				@{
-					ipTagType	= $setIpTagType
-					tag			= $setIpTag
-				}
-			)
+		else {
+			# delete IP tags
+			$ipTags = @()
 		}
 
 		# create resource
@@ -19509,6 +19707,15 @@ echo "wait 10 seconds and reboot VM..."
 #--------------------------------------------------------------
 function get-BicepFromPath {
 #--------------------------------------------------------------
+	# add current directory to path on Linux
+	if ($IsLinux) {
+		if ('.' -notin ($Env:PATH -split ':')) {
+			$Env:PATH += ':.' 
+			$Env:PATH | Out-Null # needed to re-load environment
+		}
+	}
+
+	# use local BICEP on Linux if exists
 	$whichBicep = get-command bicep -ErrorAction 'SilentlyContinue'
 
 	if ($Null -ne $whichBicep.Path) {
@@ -19542,23 +19749,26 @@ function get-bicepFromGithub {
 	# install bicep
 	if ($isWindows) {
 		try {
-			$installPath = "$env:USERPROFILE\.bicep"
+			$installPath = "$env:USERPROFILE\.bicep" # hidden BICEP directory
 			$installDir = New-Item -ItemType Directory -Path $installPath -Force
 			$installDir.Attributes += 'Hidden'
 			# Fetch the latest Bicep CLI binary
 			(New-Object Net.WebClient).DownloadFile("https://github.com/Azure/bicep/releases/latest/download/bicep-win-x64.exe", "$installPath\bicep.exe")
 			# Add bicep to your PATH
 			$currentPath = (Get-Item -path "HKCU:\Environment" ).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-			if (-not $currentPath.Contains("%USERPROFILE%\.bicep")) { setx PATH ($currentPath + ";%USERPROFILE%\.bicep") }
-			if (-not $env:path.Contains($installPath)) { $env:path += ";$installPath" }
+			if (-not $currentPath.Contains("%USERPROFILE%\.bicep")) { 
+				setx PATH ($currentPath + ";%USERPROFILE%\.bicep") 
+			}
+			if (-not $env:path.Contains($installPath)) { 
+				$env:path += ";$installPath" 
+				$env:path | Out-Null # needed to re-load environment
+			}
 		}
 		catch {
 		}
 	}
 
 	elseif ($isLinux) {
-		$bicepPath 		= "$rgcopyPath/bicep"
-
 		# remove old download
 		if (Test-Path -Path './bicep-linux-x64') {
 			Remove-Item -Path './bicep-linux-x64' -Force -ErrorAction 'SilentlyContinue'
@@ -19576,18 +19786,6 @@ function get-bicepFromGithub {
 			}
 			Rename-Item -Path './bicep-linux-x64' -NewName "bicep" -Force
 			chmod +x ./bicep
-			$Env:PATH += ':.' 
-			$linuxEnvironment = ($Env:PATH) # needed to re-load environment
-			if ($Null -eq $linuxEnvironment) {}
-		}
-
-		# alternatively, use local BICEP
-		elseif (Test-Path -Path $bicepPath) {
-			write-logFile "BICEP found in same directory as RGCOPY, add to PATH" -ForegroundColor DarkGray
-			chmod +x $bicepPath
-			$Env:PATH += ":$rgcopyPath"
-			$linuxEnvironment = ($Env:PATH) # needed to re-load environment
-			if ($Null -eq $linuxEnvironment) {}
 		}
 	}
 
@@ -19865,11 +20063,11 @@ try {
 	if ($msInternalVersion) {
 		$starCount = 75
 		write-logFile ('*' * $starCount) -ForegroundColor DarkGray
-		write-logFile 'https://github.com/azure-core/rg-copy/tree/development ' -NoNewLine
+		write-logFile "$repositoryURL " -NoNewLine
 		write-logFile $rgcopyVersion -NoNewLine -ForegroundColor DarkGray
 		write-logFile $rgcopyMode.PadLeft($starCount - 55 - $rgcopyVersion.length) -ForegroundColor 'Yellow'
 		write-logFile ('*' * $starCount) -ForegroundColor DarkGray
-		write-logFile "Get help at: https://github.com/azure-core/rg-copy/blob/development/rgcopy-docu.md" -ForegroundColor DarkGray
+		write-logFile "Get help at: $repositoryHelpURL" -ForegroundColor DarkGray
 		test-msInternalRestrictions
 	}
 	else {
@@ -19968,14 +20166,11 @@ try {
 	#--------------------------------------------------------------
 	# check software version
 	#--------------------------------------------------------------
-	# check Az version, at least version 9.1.1 to avoid the following error:
+	# minimal Az-version to 11.5.0 (needed by Get-AzAccessToken with parameter AsSecureString)
 
-	# GenericArguments[0], 'Microsoft.Azure.Management.Compute.Models.VirtualMachine', 
-	# on 'T MaxInteger[T](System.Collections.Generic.IEnumerable1[T])' violates the constraint of type 'T'.
-
-	$azVersion = (Get-InstalledModule Az -MinimumVersion 9.1.1 -ErrorAction 'SilentlyContinue')
+	$azVersion = (Get-InstalledModule Az -MinimumVersion 11.5.0 -ErrorAction 'SilentlyContinue')
 	if ($azVersion.count -eq 0) {
-		write-logFileError 'Minimum required version of module Az is 9.1.1' `
+		write-logFileError 'Minimum required version of module Az is 11.5.0' `
 							'Run "Install-Module -Name Az -AllowClobber" to install or update'
 	}
 	
@@ -20008,12 +20203,18 @@ try {
 	
 	# check for running in Azure Cloud Shell
 	if (($env:ACC_LOCATION).length -ne 0) {
-		write-logFile 'RGCOPY running on Azure Cloud Shell:' -ForegroundColor 'yellow'
+		write-logFile 'RGCOPY running in Azure Cloud Shell' -ForegroundColor 'yellow'
+		write-logFile
 	}
-	else {
-		write-logFile 'RGCOPY environment:'
+
+	# check for RDP connection
+	if ((($env:SESSIONNAME).length -ne 0) -and ($env:SESSIONNAME -ne 'Console')) {
+		write-logFile 'RGCOPY running in Terminal Server Connection' -ForegroundColor 'yellow'
+		write-logFile
 	}
+
 	# output of sofware versions
+	write-logFile 'RGCOPY environment:'
 	$psVersionString = "$($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor).$($PSVersionTable.PSVersion.Patch)"
 	write-logFileTab 'Powershell version'	$psVersionString -noColor
 	write-logFileTab 'Az version'			$azVersion.version -noColor

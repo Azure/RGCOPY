@@ -1,4 +1,16 @@
 ## Version history
+#### RGCOPY 0.9.66 December 2024
+type|change
+:---|:---
+feature|Increase minimal Az-version to 11.5.0 (needed by Get-AzAccessToken with parameter AsSecureString)
+feature|Keep installed BICEP (do not always download from internet)
+feature|Changing default of `setIpTag` for Microsoft internal RGCOPY version
+feature|For premium v2 and ultra SSD disks: Automatically increase IOPS if not sufficient for MBPS (if possible for disk size)
+feature|Retry, if log file was opened by other process (virus scanner).
+feature|Adding complete error history to log file
+feature|New parameter `skipNatGateway` for skipping NAT gateways. 
+feature|Always skip unused public IP addresses, public IP prefixes, network security groups, NAT gateways
+
 #### RGCOPY 0.9.65 September 2024
 type|change
 :---|:---
