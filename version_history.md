@@ -1,4 +1,12 @@
 ## Version history
+#### RGCOPY 0.9.67 January 2025
+type|change
+:---|:---
+documentation|Archive Mode requires a storage account that has configured public network access and shared storage account keys. For security reasons, Archive Mode has become deprecated. The documentation of Archive Mode has been removed. In the Microsoft internal version of RGCOPY, Archive Mode has been completely blocked.
+bug fix|Allow restoring in Archive mode (in the Open Source version of RGCOPY) even after the snapshots in the source system have been deleted.
+feature|Allow using a different sizes of snapshot and disk size when using parameter `swapSnapshot4disk`
+
+## Version history
 #### RGCOPY 0.9.66 December 2024
 type|change
 :---|:---

@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.66
-version date:     December 2024
+version:          0.9.67
+version date:     January 2025
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 
@@ -3065,7 +3065,7 @@ function show-snapshots {
 	| write-LogFilePipe
 
 
-	if ($skipSnapshots) {		
+	if ($skipSnapshots -and ($pathArmTemplate -notin $boundParameterNames)) {		
 		$script:copyDisks.values
 		| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) }
 		| ForEach-Object {
@@ -4822,10 +4822,9 @@ function update-paramSwapSnapshot4disk {
 		}
 		
 		# check if snapshot fits to disk
-		if ($snap.DiskSizeGB -ne $script:copyDisks[$diskName].SizeGB) {
-			write-logFileError "Invalid parameter '$script:paramName'" `
-								"disk '$diskName' has a different size than" `
-								"snapshot '$snapshotName'"
+		if ($script:copyDisks[$diskName].SizeGB -ne $snap.DiskSizeGB) {
+			$script:copyDisks[$diskName].SizeGB = $snap.DiskSizeGB
+			write-logFileWarning "Adjusting size of disk '$diskName' to size of snapshot '$snapshotName'"
 		}
 		if (($snap.CreationData.LogicalSectorSize -eq 4096) -and ($script:copyDisks[$diskName].LogicalSectorSize -ne 4096)) {
 			write-logFileError "Invalid parameter '$script:paramName'" `

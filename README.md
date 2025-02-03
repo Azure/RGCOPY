@@ -54,14 +54,11 @@ The documentation of the OSS version is available here:
 
 There also exists a Microsoft internal version of RGCOPY with additional features. It is stored in a different repository. 
 
-## YouTube trainings
+## YouTube training
 You can watch an introduction to RGCOPY on YouTube (22:35):
 
-[![RGCOPY Update Mode](https://i.ytimg.com/vi/8pCN10CRXtY/hqdefault.jpg)](https://www.youtube.com/watch?v=8pCN10CRXtY)
+[![RGCOPY](https://i.ytimg.com/vi/8pCN10CRXtY/hqdefault.jpg)](https://www.youtube.com/watch?v=8pCN10CRXtY)
 
-An overview of RGCOPY Update Mode is also available on YouTube (9:27):
-
-[![RGCOPY Update Mode](https://i.ytimg.com/vi/_iiSeyci7TY/hqdefault.jpg)](https://www.youtube.com/watch?v=_iiSeyci7TY)
 
 ## Trademarks
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 

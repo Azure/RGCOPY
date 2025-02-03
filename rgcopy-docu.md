@@ -1,6 +1,6 @@
 # RGCOPY documentation
 ***
-**Version: 0.9.65<BR>September 2024**
+**Version: 0.9.67<BR>January 2025**
 ***
 
 ### Introduction
@@ -187,8 +187,8 @@ The resource group parameters are essential for running RGCOPY:
 parameter|[DataType]: usage
 :---|:---
 **`sourceRG`**			|**[string]**: name of the source resource group<ul><li> parameter is **mandatory**</li></ul>
-**`targetRG`**			|**[string]**: name of the target resource group<ul><li> parameter is **mandatory** in **Copy Mode** and  **Archive Mode**</li><li>parameter is **optional** in **Merge Mode** </li><li>parameter is **not allowed** in **Update Mode** and **Clone Mode** </li></ul> :memo: **Note:** Source and target resource group must not be identical except in **Merge Mode**<BR>:memo: **Note:** The target resource group might already exist. However, it should not contain resources. For safety reasons, RGCOPY does not allow using a target resource group that already contains disks (unless you set switch parameter **`allowExistingDisks`**).
-**`targetLocation`**	|**[string]**: *location name* of the Azure region for the target RG, for example 'eastus'.<ul><li>parameter is **mandatory** in **Copy Mode** and **Archive Mode**</li><li> parameter is **not allowed** in **Update Mode** and **Clone Mode**</li></ul>:memo: **Note:** Use the location name (for example, 'eastus'). Do **not** use the *display name* ('East US') instead.
+**`targetRG`**			|**[string]**: name of the target resource group<ul><li> parameter is **mandatory** in **Copy Mode**</li><li>parameter is **optional** in **Merge Mode** </li><li>parameter is **not allowed** in **Update Mode** and **Clone Mode** </li></ul> :memo: **Note:** Source and target resource group must not be identical except in **Merge Mode**<BR>:memo: **Note:** The target resource group might already exist. However, it should not contain resources. For safety reasons, RGCOPY does not allow using a target resource group that already contains disks (unless you set switch parameter **`allowExistingDisks`**).
+**`targetLocation`**	|**[string]**: *location name* of the Azure region for the target RG, for example 'eastus'.<ul><li>parameter is **mandatory** in **Copy Mode**</li><li> parameter is **not allowed** in **Update Mode** and **Clone Mode**</li></ul>:memo: **Note:** Use the location name (for example, 'eastus'). Do **not** use the *display name* ('East US') instead.
 **`targetSA`**         |**[string]**: name of the storage account that will be created in the target RG for storing BLOBs.
 **`sourceSA`**         |**[string]**: name of the storage account that will be created in the source RG for storing file backups. This storage account is only created when parameter **`createVolumes`** or **`createDisks`** is set.
 
@@ -281,7 +281,7 @@ parameter|usage (data type is always [string] or [array])
 **`ultraSSDEnabled`**|**[switch]**: By default, VMs in the target RG only support Ultra SSD disks if such a disk is already attached. If you want to attach a new Ultra SSD disk later then you must set this RGCOPY switch when creating the target RG.
 
 ### Default values
-RGCOPY uses default parameter values in **Copy Mode**. If you do not want this then set parameter switch **`skipDefaultValues`** or explicitly set the individual parameters to a different value. In **Archive Mode** and **Update Mode** no default values are used. These are the default values in **Copy Mode**:
+RGCOPY uses default parameter values in **Copy Mode**. If you do not want this then set parameter switch **`skipDefaultValues`** or explicitly set the individual parameters to a different value. In **Update Mode** no default values are used. These are the default values in **Copy Mode**:
 
 parameter|default value|default behavior
 :---|:---:|:---
@@ -702,80 +702,7 @@ Availability resources<ul><li>PPGs</li><li>AvSets</li><li>VMSS Flex</li></ul>|<u
 Availability Zone|**removed** by default<BR>(can be changed using `setVmZone`)|**copied** by default<BR>(can be changed using `setVmZone`)|see Merge Mode
 Disk SKU|set to **Premium_LRS** by default<BR>(can be changed using `setDiskSku`)|**copied** by default<BR>(can be changed using `setDiskSku`)|see Merge Mode
 
-
-
-
 <div style="page-break-after: always"></div>
-
-
-***
-## Archive Mode
-Stopping not needed VMs reduces Azure costs. However, premium disks can cause a significant part of the overall costs. You will be charged for the disks even when all VMs have been stopped. One solution would be changing the disk SKU from Premium_LRS to Standard_LRS. This can be done easily using RGCOPY [Update Mode](./rgcopy-docu.md#Update-Mode).
-
-In **Archive Mode**, a backup of all disks to cost-effective BLOB storage is created. An BICEP or ARM template that contains the resources of the source RG is also stored in the BLOB storage. After that, you could delete the source RG for saving costs. You can restore the original source RG using the saved BICEP or ARM template **in the same region**. However, you cannot use RGCOPY for modifying the saved template. This might be needed if you have reached your subscription quota for a used VM size at the point in time you want to restore. Regardless of this, you can always manually modify the template and deploy it without using RGCOPY.
-
-> :warning: **Warning:** Be careful when deleting the source RG. RGCOPY does not copy *all* resources in the source RG (see section [Supported Azure Resources](./rgcopy-docu.md#Supported-Azure-Resources)). When using Archive Mode, you should carefully read all warnings in the RGCOPY log file *before* deleting the source RG.
-
-Archive Mode is activated by RGCOPY parameter switch **`archiveMode`**. You must provide parameters `targetRG` and `targetLocation`. The target location might or might not be the same as the location of the source RG. However, the saved BLOBs can only be used for deploying disks in the target location (region).
-
-In Archive Mode, a storage account is created the same way as usual when copying a resource group using RGCOPY with parameter switch `useBlobCopy`. However, the name of the storage account container is not 'rgcopy'. Instead, the container name is the name of the source RG (after removing special characters). The idea is having just a single (target) resource group that can contain the BLOB backups of many source RGs.
-
-The following example shows how to use parameter `archiveMode`. You could add additional RGCOPY parameters for changing resource properties in the created ARM template. This does not change the source RG. The ARM template will not be deployed. It will just be stored in the BLOB storage:
-
-```powershell
-$rgcopyParameter = @{
-    sourceSub       = 'Contoso Subscription'
-    sourceRG        = 'contoso_source_rg'
-
-    targetRG        = 'contoso_backups'
-    targetLocation  = 'eastus'
-    archiveMode     = $True
-}
-.\rgcopy.ps1 @rgcopyParameter
-```
-
-After running this, the BLOB storage will contain the following files:
-- one BLOB for each disk containing the backup
-- the file rgcopy.arm-templates.zip that contains all exported templates, the generated BICEP or ARM template and a PowerShell script that can be used for restoring the source RG.
-- the RGCOPY zip file containing all logs
-
-The generated PowerShell script in this example looks like this:
-
-```powershell
-# generated script by RGCOPY for restoring
-$param = @{
-    # set targetRG:
-    targetSub           = 'Contoso Subscription'
-    targetRG            = 'contoso_source_rg'
-
-    #--- do not change the rest of the parameters:
-    sourceSub           = 'Contoso Subscription'
-    sourceRG            = 'contoso_backups'
-    targetLocation      = 'eastus'
-    pathArmTemplate     = 'C:\Users\user\rgcopy.contoso_source_rg.TARGET.json'
-    #---
-}
-C:\Users\user\rgcopy.ps1 @param
-```
-> :memo: **Note:** You can only deploy an archived resource group in the region where the BLOBs are located. Therefore, changing the parameter `targetLocation` in the script above is not allowed.
-
-The following parameters can be set in Archive Mode:
-
-parameter|[DataType]: usage
-:---|:---
-**`archiveMode`**|**[switch]**: Turns on Archive Mode
-**`archiveContainer`**|**[string]**: Name of the storage account container used for the backup if you do not want to use the calculated default name. The container 'rgcopy' is reserved for **Copy Mode** and therefore not allowed here.
-**`archiveContainerOverwrite`**|**[switch]**: By default, RGCOPY does not allow archiving into an existing container to prevent overwriting a backup. Using this switch, you can skip this safety check.
-**`targetSA`**|**[string]**: Name of the storage account used for the backup if you do not want to use the calculated default name. This is the same parameter as in **Copy Mode**.
-**`restartRemoteCopy`**<BR>**`justStopCopyBlobs`**<BR>**`justCopyBlobs`**<BR>| Same parameters as in **Copy Mode**. They are described in section [Parameters for Remote Copy](./rgcopy-docu.md#Parameters-for-Remote-Copy). These parameters are useful once the long-running BLOB copy fails for any reason.
-**`deleteSnapshots`**| Same parameter as in **Copy Mode**. This are described in section [Cost Efficiency](./rgcopy-docu.md#Cost-Efficiency).
-**`setVmSize`**<BR>**`setDiskSize`**<BR>**`setDiskTier`**<BR>**`setDiskCaching`**<BR>**`setDiskSku`**<BR>**`setAcceleratedNetworking`**|Same parameters as in **Copy Mode**. They are described in section [Resource Configuration Parameters](./rgcopy-docu.md#Resource-Configuration-Parameters). Be aware that these parameters only have an impact on the created ARM template. The ARM template is not deployed. Properties are not changed in the source RG when using these parameters in **Archive Mode**
-
-In Archive Mode all disks are copied, including detached disks. However, in this mode you cannot copy **NetApp volumes**. Parameter `skipDisks` is not allowed in Archive Mode. Once parameter `skipVMs` is set, detached disks are not copied (unless you set parameter `copyDetachedDisks`).
-
-
-<div style="page-break-after: always"></div>
-
 
 ***
 ## Update Mode
@@ -1025,8 +952,6 @@ parameter|[DataType]: usage
 **`installExtensionsSapMonitor`** |**[array]**: Names of VMs for deploying the SAP Monitor Extension.<BR>Alternatively, you can set the Azure tag `rgcopy.Extension.SapMonitor` for the VM. If you do not want to install the SAP Monitor Extension although the Azure tag has been set, use switch `ignoreTags`.
 
 ### Cost Efficiency
-You can save Azure costs by using RGCOPY [Archive Mode](./rgcopy-docu.md#Archive-Mode) and [Update Mode](./rgcopy-docu.md#Update-Mode) as described above. This chapter describes how to save costs caused by RGCOPY.
-
 By default, RGCOPY does not delete all its intermediate storage (snapshots in source RG, file backups). This can save a lot of time when regularly copying the same resource group. However, the intermediate storage results in Azure charges.
 
 The following parameters activate additional steps at the very end of an RGCOPY run:
@@ -1111,9 +1036,7 @@ file|*[DataType]*: usage
 `rgcopy.<target_RG>.TARGET.json`<BR>`rgcopy.<source_RG>.TARGET.json`<BR>`rgcopy.<target_RG>.TARGET.bicep`<BR>`rgcopy.<target_RG>.DISKS.bicep`|Generated template files created by RGCOPY<BR>(dependent on used RGCOPY mode)
 `rgcopy.<target_RG>.TARGET.log`<BR>`rgcopy.<source_RG>.SOURCE.log`|Standard RGCOPY log file<BR>(dependent on used RGCOPY mode)
 `rgcopy.txt`|Backup of the running script rgcopy.ps1 used for support
-`rgcopy.<source_RG>.RESTORE.ps1.txt`|Generated PowerShell script when using **Archive Mode**
 `rgcopy.<target_RG>.<time>.zip`<BR>`rgcopy.<source_RG>.<time>.zip`| Compressed ZIP file that contains all files above<BR>(dependent on used RGCOPY mode)
-`rgcopy.arm-templates.zip`|ZIP file containing ARM templates when using **Archive Mode**
 `rgcopy.<target_RG>.TEMP.json`<BR>`rgcopy.<target_RG>.TEMP.txt`| temporary files
 
 
