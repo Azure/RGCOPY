@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.67
-version date:     January 2025
+version:          0.9.68
+version date:     March 2025
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 
@@ -4823,8 +4823,28 @@ function update-paramSwapSnapshot4disk {
 		
 		# check if snapshot fits to disk
 		if ($script:copyDisks[$diskName].SizeGB -ne $snap.DiskSizeGB) {
-			$script:copyDisks[$diskName].SizeGB = $snap.DiskSizeGB
+			$sku 			= $script:copyDisks[$diskName].SkuName
+			$SizeGB			= $snap.DiskSizeGB
+			$SizeTierName	= get-diskTier $SizeGB $sku
+			$SizeTierGB		= get-diskSize $SizeTierName
+			if ($sku -like 'Premium_?RS') {
+				$performanceTierName = $SizeTierName
+			}
+			else {
+				$performanceTierName = $Null
+			}
+			$performanceTierGB = get-diskSize $performanceTierName
+
 			write-logFileWarning "Adjusting size of disk '$diskName' to size of snapshot '$snapshotName'"
+			$script:copyDisks[$diskName].SizeGB = $SizeGB
+			$script:copyDisks[$diskName].SizeTierName = $SizeTierName
+			$script:copyDisks[$diskName].SizeTierGB = $SizeTierGB
+
+			if ($script:copyDisks[$diskName].performanceTierName -ne $performanceTierName) {
+				write-logFileWarning "Removing performance tier of disk '$diskName'"
+				$script:copyDisks[$diskName].performanceTierName = $performanceTierName
+				$script:copyDisks[$diskName].performanceTierGB = $performanceTierGB
+			}
 		}
 		if (($snap.CreationData.LogicalSectorSize -eq 4096) -and ($script:copyDisks[$diskName].LogicalSectorSize -ne 4096)) {
 			write-logFileError "Invalid parameter '$script:paramName'" `

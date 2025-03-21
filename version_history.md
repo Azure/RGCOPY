@@ -1,4 +1,9 @@
 ## Version history
+#### RGCOPY 0.9.68 March 2025
+type|change
+:---|:---
+bug|removing performance tier when disk size has been changed by parameter `swapSnapshot4disk`
+
 #### RGCOPY 0.9.67 January 2025
 type|change
 :---|:---
