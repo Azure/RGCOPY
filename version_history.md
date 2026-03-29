@@ -1,8 +1,21 @@
 ## Version history
+#### RGCOPY 0.9.69 March 2026
+type|change
+:---|:---
+feature|New parameter `parameterFile`. Used for storing parameter sets and default parameters.
+feature|Enable copy of resource groups between different tenants (even between public and Microsoft internal subscriptions). Hereby, a storage account is created in the target RG that temporarily stores the disk snapshots as BLOBs. For MS internal subscriptions, the storage account does not allow shared keys and is associated with a Networks security Perimeter (NSP) in learning mode.
+feature|Copy storage accounts including content (BLOBs and files from SMB and NFS shares) even between different tenants.<BR>New parameters `renameSa`, `copySaShares`, `subnetIdControlPlane`, `copySaUsingSnapshots`, `copySaKeyName`, `copySaRevokeCpAccess`, `copySaEnvironment`, `justCopySaShares`
+feature|Improve file copy (of NetApp files) and documentation. Include a verify step.<BR>Remove parameters ~~`netAppSubnet`~~, ~~`subnetEndpoint`~~, ~~`deleteSourceSA`~~. <BR>New parameters `subnetNetApp`, `netAppNetworkFeatures`, `deleteBackups`, `deleteBackupsOnly`, `waitBackup`, `waitRestore`
+feature|New parameters `takeVMs`, `skipDiskCreation`. Remove parameter ~~`skipDeploymentVMs`~~
+feature|Installation and update of BICEP and AZCOPY using RGCOPY. New parameters `updateAzcopy`, `updateBicep`.
+feature|Create TrustedLaunch OS-disks using BICEP template rather than manually
+feature|Rename `restartRemoteCopy` to `waitRemoteCopy`
+feature|Never remove existing UltraSSD support from VMs (even when no UltraSSDs are attached)
+
 #### RGCOPY 0.9.68 March 2025
 type|change
 :---|:---
-bug|removing performance tier when disk size has been changed by parameter `swapSnapshot4disk`
+bug fix|removing performance tier when disk size has been changed by parameter `swapSnapshot4disk`
 
 #### RGCOPY 0.9.67 January 2025
 type|change
@@ -11,7 +24,6 @@ documentation|Archive Mode requires a storage account that has configured public
 bug fix|Allow restoring in Archive mode (in the Open Source version of RGCOPY) even after the snapshots in the source system have been deleted.
 feature|Allow using a different sizes of snapshot and disk size when using parameter `swapSnapshot4disk`
 
-## Version history
 #### RGCOPY 0.9.66 December 2024
 type|change
 :---|:---
@@ -37,7 +49,7 @@ feature|Allow BLOB copy for Microsoft internal version of RGCOPY (using storage 
 type|change
 :---|:---
 feature|Make snapshot copy default when copying into a different region. Therefore, no storage account is needed anymore.
-feature|Use variable wait times. Remove parameters `testDelayCreation` and `testDelayCopy`.
+feature|Use variable wait times. Remove parameters ~~`testDelayCreation`~~ and ~~`testDelayCopy`~~.
 feature|Always SNAPSHOT copy rather than BLOB copy for disks larger than 4TiB
 feature|Rename parameter `useBlobs` to `useBlobCopy`. Rename `skipBlobs` to `skipRemoteCopy`. Rename `restartBlobs` to `restartRemoteCopy`.
 feature|New parameter `dualDeployment`. Without setting this parameter, a separate template for disk creation is never used.
@@ -48,7 +60,7 @@ type|change
 :---|:---
 feature|Never allow shared key access for storage accounts.<BR>You should use snapshot copy rather than BLOB copy if RGCOPY has only the `Subscription Contributor` role in the target subscription.
 bug fix|Stop all VMs after creating snapshots once parameter `pathPreSnapshotScript` had been set.
-feature|Change file copy for NetApp volumes: Use NFS with private endpoint rather than SMB with storage account keys. Remove parameter `smbTier`. New parameter `nfsQuotaGiB`
+feature|Change file copy for NetApp volumes: Use NFS with private endpoint rather than SMB with storage account keys. Remove parameter ~~`smbTier`~~. New parameter `nfsQuotaGiB`
 
 #### RGCOPY 0.9.62 April 2024
 type|change
@@ -69,7 +81,7 @@ feature| Copy user assigned managed identities by default. New parameter `skipId
 type|change
 :---|:---
 feature| Using Get-AzAccessToken instead of .NET API AcquireAccessToken, as recommended by Azure DEV.
-feature| Always install VM extensions `AzureMonitor*Agent`(except when parameter `skipExtensions` is set). Remove parameter `installExtensionsAzureMonitor`. New parameter `autoUpgradeExtensions`.
+feature| Always install VM extensions `AzureMonitor*Agent`(except when parameter `skipExtensions` is set). Remove parameter ~~`installExtensionsAzureMonitor`~~. New parameter `autoUpgradeExtensions`.
 
 #### RGCOPY 0.9.58 March 2024
 type|change
@@ -162,7 +174,7 @@ feature|Converting disk SKU to `PremiumV2_LRS` and `UltraSSD_LRS` using Incremen
 feature|New parameter `ultraSSDEnabled`.
 feature|Set default of parameter `useBicep` to `$True`.
 feature|Automatically install BICEP tools if they are not available
-feature|New parameter `useSnapshotCopy`, remove parameter `blobsfromdisk`
+feature|New parameter `useSnapshotCopy`, remove parameter ~~`blobsfromdisk`~~
 feature|Support for inbound Nat Rules/Pools in Load Balancers
 feature|In Linux, it is sufficient to copy the file `bicep` into the same directory as `rgcopy.ps1` (rather than installing BICEP).
 
@@ -198,11 +210,11 @@ bug fix| regression in RGCOPY 0.9.40 resulted in deployment errors when copying 
 type|change
 :---|:---
 warning|**Always install the newest version of PowerShell *and* az-cmdlets!** <BR>When installing the newest PowerShell (7.3.0) with older az-cmdlets then RGCOPY might terminate with the following error:<BR>`GenericArguments[0], 'Microsoft.Azure.Management.Compute.Models.VirtualMachine', on 'T MaxInteger[T](System.Collections.Generic.IEnumerable1[T])' violates the constraint of type 'T'.`<BR>If you install the newest az version 9.1.1 then RGCOPY works fine even with the newest PowerShell version 7.3.0
-UI| Removed support for AMS v1 as announced in February 2022.<BR>Remove parameters `pathArmTemplateAms`, `createArmTemplateAms`, `amsInstanceName`, `amsWsName`, `amsWsRG`, `amsWsKeep`, `amsShareAnalytics`, `dbPassword`, `amsUsePowerShell` and `justRedeployAms`.
+UI| Removed support for AMS v1 as announced in February 2022.<BR>Remove parameters ~~`pathArmTemplateAms`~~, ~~`createArmTemplateAms`~~, ~~`amsInstanceName`~~, ~~`amsWsName`~~, ~~`amsWsRG`~~, ~~`amsWsKeep`~~, ~~`amsShareAnalytics`~~, ~~`dbPassword`~~, ~~`amsUsePowerShell`~~ and ~~`justRedeployAms`~~.
 UI | Added a warning that ProximityPlacementGroups, AvailabilitySets and VmssFlex are removed if VM Tag `rgcopy.TipGroup` was used.
 workaround for Azure changes|**The behavior of VMSS Flex has changed for Fault Domain Count FD>1:**<BR>The **current** behavior is the following: <ul><li>For M-Series VMs:<BR>You must not set the fault domain for the VM. If you do so, RGCOPY gives a warning: use parameter 'setVmFaultDomain' for setting fault domain to 'none'.<BR>Hereby, a VMSS Flex with FD>1 that contains M-series VMs behaves like an Availability Set.</li><li>For non M-Series VMs:<BR>You must now set the VMSS Flex property  `singlePlacementGroup` = `False`.<BR>This is done now automatically by RGCOPY. However, you can use RGCOPY parameter `singlePlacementGroup` for changing this (once the VMSS Flex behavior changes in the future).</li><li>Mixing M-Series VMs with other VMs is not allowed inside a VMSS Flex<BR>In this case, RGCOPY gives a warning.</li></ul>In older versions of RGCOPY you might get the deployment error:<BR>`Cannot set 'platformFaultDomain' on Virtual Machine 'hana2' because the Virtual Machine Scale Set 'vmss' that it references has 'singlePlacementGroup' = true. (Code:BadRequest)`
- workaround for Azure changes| **The semantic of zone definition for Public IP Addresses has changed (see below):**<BR>As a workaround, RGCOPY now always sets SKU = `Standard` and IPAllocationMethod = `Static` for Public IP Addresses. Parameters `setPublicIpSku` and `setPublicIpAlloc` have been removed.<BR>In older versions of RGCOPY you will see the following error when deploying a VM with a public IP address to an Availability Zone:<BR>`Compute resource /subscriptions/.../virtualMachines/... has a zone constraint 3 but the PublicIPAddress /subscriptions/... used by the compute resource via NetworkInterface or LoadBalancer has a different zone constraint Regional. (Code: ComputeResourceZoneConstraintDoesNotMatchPublicIPAddressZoneConstraint)`
-  UI| RGCOPY now always sets SKU = `Standard` for Load Balancers. Parameter `setLoadBalancerSku` has been removed.
+ workaround for Azure changes| **The semantic of zone definition for Public IP Addresses has changed (see below):**<BR>As a workaround, RGCOPY now always sets SKU = `Standard` and IPAllocationMethod = `Static` for Public IP Addresses. Parameters ~~`setPublicIpSku`~~ and ~~`setPublicIpAlloc`~~ have been removed.<BR>In older versions of RGCOPY you will see the following error when deploying a VM with a public IP address to an Availability Zone:<BR>`Compute resource /subscriptions/.../virtualMachines/... has a zone constraint 3 but the PublicIPAddress /subscriptions/... used by the compute resource via NetworkInterface or LoadBalancer has a different zone constraint Regional. (Code: ComputeResourceZoneConstraintDoesNotMatchPublicIPAddressZoneConstraint)`
+  UI| RGCOPY now always sets SKU = `Standard` for Load Balancers. Parameter ~~`setLoadBalancerSku`~~ has been removed.
 
  Semantic changes of zone definition for Public IP Addresses:
 ```

@@ -1,6 +1,6 @@
 # RGCOPY
 
-RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group to a new resource group. The target RG might be in a different region or subscription. RGCOPY has been tested on **Windows**, **Linux** and in **Azure Cloud Shell**. It should run on **MacOS**, too.
+RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies the most important resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group to a new resource group. The target RG might be in a different region or subscription. RGCOPY has been tested on **Windows**, **Linux** and in **Azure Cloud Shell**.
 
 The following example demonstrates the user interface of RGCOPY
 
@@ -17,26 +17,90 @@ $rgcopyParameter = @{
 
 !["RGCOPY"](/images/RGCOPY.png)
 
-RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it supports the most important Azure resources needed for SAP, as virtual machines, managed disks and Load Balancers. However, you can use RGCOPY also for other workloads.
+RGCOPY has been developed for copying an SAP landscape and testing Azure with SAP workload. Therefore, it supports the most important Azure resources needed for SAP, for example **VMs**, **disks**, **load balancers**, storage accounts including content of **containers** and **shares**.
 
->:memo: **Note:** The list of supported Azure resources is maintained in the RGCOPY documentation: **[https://github.com/Azure/RGCOPY/blob/main/rgcopy-docu.md#Supported-Azure-Resources](./rgcopy-docu.md#Supported-Azure-Resources)** 
+>:memo: **Note:** The list of supported Azure resources is maintained in the RGCOPY documentation: **[https://github.com/Azure/RGCOPY/blob/main/rgcopy-docu.md#Supported-Azure-Resources](./rgcopy-docu.md#Supported-Azure-Resources)**
 
-## RGCOPY operation modes
+## Examples
+The following examples show the usage of RGCOPY. In all examples, a source RG with the name 'SAP_master' is copied to the target RG 'SAP_copy'. For better readability, the examples use parameter splatting, see <https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_splatting>. Before starting RGCOPY, you must run the PowerShell cmdlet `Connect-AzAccount`.
 
-RGCOPY has different operation modes. By default, RGCOPY is running in Copy Mode. 
-- In **[Copy Mode](./rgcopy-docu.md#Workflow)**, an BICEP or ARM template is exported from the source RG, modified and deployed in the target RG. Disks are copied using snapshots. You can change several [resource properties](./rgcopy-docu.md#Resource-Configuration-Parameters) in the target RG:
-    - Changing **VM size**, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking
-    - Adding, removing, and changing [availability](./rgcopy-docu.md#Parameters-for-Availability) configuration: **Proximity Placement Groups**, **Availability Sets**, **Availability Zones**, and **VM Scale Sets**
-    - Converting **disk SKUs** `Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`, `UltraSSD_LRS` and `PremiumV2_LRS` using (incremental) **snapshots** and snapshot copy. Changing the logical sector size is not possible.
-    - Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa using **file copy**
-- In **[Clone Mode](./rgcopy-docu.md#Clone-Mode)**, a VM is cloned within the same resource group. This can be used for adding application servers
-- In **[Merge Mode](./rgcopy-docu.md#Merge-Mode)**, a VM is merged into a different resource group. This can be used for copying a jump box to a different resource group.
-- In **[Update Mode](./rgcopy-docu.md#Update-Mode)**, you can change resource properties in the source RG, for example VM size, disk performance tier, disk bursting, disk caching, Write Accelerator, Accelerated Networking. For saving costs of unused resource groups, RGCOPY can do the following:
-    - Changing disk SKU to 'Standard_LRS' (if the source disk has a logical sector size of 512 byte)
-    - Deletion of an Azure Bastion including subnet and IP Address (or creation of a Bastion)
-    - Deletion of all snapshots in the source RG
-    - Stopping all VMs in the source RG
-    - Changing NetApp service level to 'Standard' (or any other service level)
+```powershell
+# connect to Azure
+Update-AzConfig -EnableLoginByWam $true
+Connect-AzAccount `
+    -AuthScope 'Storage' `
+    -TenantId '7b5ebd57-e5fd-445f-a920-55897cd71921' `
+    -Subscription 'Contoso Subscription'
+
+
+# start RGCOPY using cached credentials
+$rgcopyParameter = @{
+    sourceRG        = 'SAP_master'
+    targetRG        = 'SAP_copy'
+    targetLocation  = 'westus'
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+You might have cached credentials for different subscriptions and users. In this case, you must specify user and subscription using RGCOPY parameters:
+
+
+```powershell
+$rgcopyParameter = @{
+    # parameters for subscription and user 
+    sourceSub       = 'Contoso Subscription'
+    sourceSubUser   = 'user@contoso.com'
+    sourceSubTenant = '7b5ebd57-e5fd-445f-a920-55897cd71921'
+
+    sourceRG        = 'SAP_master'
+    targetRG        = 'SAP_copy'
+    targetLocation  = 'westus'
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+You can store often used parameters in a separate parameter file and pass the filename to RGCOPY. The example above looks like this when having the parameter file `parameterFiles\contoso.json` 
+
+```powershell
+$rgcopyParameter = @{
+    # using a parameter file
+    parameterFile   = 'parameterFiles\contoso.json'
+
+    sourceRG        = 'SAP_master'
+    targetRG        = 'SAP_copy'
+    targetLocation  = 'westus'
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
+
+```json
+{
+    // file 'parameterFiles\contoso.json'
+    "sourceSub": "Contoso Subscription",
+    "sourceSubUser": "user@contoso.com",
+    "sourceSubTenant": "7b5ebd57-e5fd-445f-a920-55897cd71921",
+
+    "targetSub": "Contoso Subscription",
+    "targetSubUser": "user@contoso.com",
+    "targetSubTenant": "7b5ebd57-e5fd-445f-a920-55897cd71921"
+}
+```
+
+You can change almost all properties of VMs and disks in the target RG. The following example changes the VM size to Standard_M16ms (for VMs HANA1 and HANA2), Standard_M8ms (for VM SAPAPP) and Standard_D2s_v4 (for all other VMs):
+```powershell
+$rgcopyParameter = @{
+    sourceRG        = 'SAP_master'
+    targetRG        = 'SAP_copy'
+    targetLocation  = 'westus'
+
+    setVmSize = @(
+        'Standard_M16ms @ HANA1, HANA2',
+        'Standard_M8ms @ SAPAPP',
+        'Standard_D2s_v4'
+    )	
+}
+.\rgcopy.ps1 @rgcopyParameter
+```
 
 ## Using RGCOPY for copying SAP systems
 
