@@ -1,6 +1,6 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.74
+version:          0.9.75
 version date:     July 2026
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
@@ -258,7 +258,6 @@ param (
 	,[string] $jumpboxName			= ''					# create FQDN for public IP of jumpbox
 	,[switch] $ignoreTags									# ignore rgcopy*-tags for target RG CONFIGURATION
 	,[switch] $copyDetachedDisks							# copy disks that are not attached to any VM
-	,[switch] $skipLinuxCpuStats
 
 	#--------------------------------------------------------------
 	# skip resources from sourceRG
@@ -276,6 +275,18 @@ param (
 	,[switch] $skipBootDiagnostics							# do not create Boot Diagnostics (managed storage account)
 	,[switch] $skipIdentities								# do not copy user assigned identities
 	,[switch] $skipSaNwRules
+
+	,[switch] $copyVMsOnly
+
+	#--------------------------------------------------------------
+	# rename resources
+	#--------------------------------------------------------------
+	,$setVmName = @()
+	# renames VM resource name (not name on OS level)
+	# usage: $setVmName = @("$vmNameNew@$vmNameOld", ...)
+	# set VM name dbserver for VM hana (=rename hana)	@("dbserver@hana")
+	,$renameSa = @()
+	,[switch] $renameDisks	# rename all disks using their VM name
 
 	#--------------------------------------------------------------
 	# resource configuration parameters
@@ -390,15 +401,8 @@ param (
 	# usage: $setVmEncryptionAtHost = @("$bool@$vm1,$vm2,...", ...)
 	#	with $bool -in @('True', 'False')
 
-	,$setVmName = @()
-	# renames VM resource name (not name on OS level)
-	# usage: $setVmName = @("$vmNameNew@$vmNameOld", ...)
-	# set VM name dbserver for VM hana (=rename hana)	@("dbserver@hana")
-
 	,$swapSnapshot4disk = @()
 	,$swapDisk4disk = @()
-
-	,[switch] $renameDisks	# rename all disks using their VM name
 
 	#--------------------------------------------------------------
 	# parameters for file copy
@@ -432,7 +436,7 @@ param (
 	#--------------------------------------------------------------
 	# parameters for storage account copy
 	#--------------------------------------------------------------
-	,$renameSa = @()
+	# ,$renameSa = @()
 	,$copySaShares 					= $false  	# $false, $true, or [array] of share names
 	,[switch] $copySaUsingSnapshots				# use RGCOPY snapshot of SMB/NFS share rather than share content
 	,[switch] $copySaRevokeCpAccess				# revoke access from control plane VM after content was copied
@@ -450,7 +454,8 @@ param (
 	,[switch] $useNewVmSizes			# get VM capabilities from local file
 	,[switch] $targetNoSaKeys			# do not allow using SA keys for snapshot-to-BLOB copy (SA in target RG)
 	,[switch] $sourceNoSaKeys			# do not allow using SA keys for file copy (SA in source RG)
-	,$defaultDiskZone					# zone for detached disks or when using justCopyDisks
+	,[ValidateSet(0, 1, 2, 3)]
+	 $defaultDiskZone					# zone for detached disks or when using justCopyDisks
 	,$defaultDiskName					# use for justCopyDisks with a single disk: rename disk it target RG
 
 	#--------------------------------------------------------------
@@ -1397,7 +1402,7 @@ function write-zipFile {
 			@{ Name = "timestamp`n[$day]"; Expression = { $_.timestamp.ToString('HH:mm:ss')}; Width = 12  }, `
 			@{ Name = "step`n[name]"; Expression = { $_.step }; Width = 34 }, `
 			@{ Name = "elapsed`n[minutes]"; Expression = { "{0:F2}" -f $_.elapsedMinutes }; Alignment = 'Right'; Width = 10 }, `
-			@{ Name = "work`n[minutes]"; Expression = { "{0:F2}" -f $_.usedMinutes }; Alignment = 'Right'; Width = 10 }, `
+			@{ Name = "worker`n[minutes]"; Expression = { "{0:F2}" -f $_.usedMinutes }; Alignment = 'Right'; Width = 10 }, `
 			@{ Name = "size`n[GiB]"; Expression = { $_.sizeGB }; Alignment = 'Right'; Width = 10 } `
 		| Out-String -Width $screenWidthLarge `
 		| write-logFilePipe
@@ -2921,8 +2926,7 @@ function get-skuProperties {
 								-Location $targetLocation `
 								-ErrorAction 'SilentlyContinue'
 
-	test-cmdlet 'Get-AzComputeResourceSku'  "Could not get SKU definition for region '$targetLocation'" `
-				"You can skip this step using RGCOPY parameter switch 'skipVmChecks'"
+	test-cmdlet 'Get-AzComputeResourceSku'  "Could not get SKU definition for region '$targetLocation'"
 
 	set-context -restore # *** CHANGE SUBSCRIPTION **************
 }
@@ -3239,7 +3243,6 @@ function test-vmSize {
 		if (($zone -gt 0) -and ($zone -notin $sku.LocationInfo.Zones)) {
 			write-logFileWarning "VM Consistency check failed" `
 								"VM Size '$vmSize' not available in zone $zone of region '$targetLocation'" `
-								"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 								-stopCondition $True
 		}
 	
@@ -3249,7 +3252,6 @@ function test-vmSize {
 			if ($targetLocation -in $restriction.RestrictionInfo.Locations) {
 				write-logFileWarning "VM Consistency check failed" `
 								"VM Size '$vmSize' not available in region '$targetLocation': $($restriction.ReasonCode)" `
-								"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 								-stopCondition $True
 			}
 		}
@@ -3260,7 +3262,6 @@ function test-vmSize {
 			if (($zone -gt 0) -and ($zone -in $restriction.RestrictionInfo.Zones)) {
 				write-logFileWarning "VM Consistency check failed" `
 									"VM Size '$vmSize' not available in in zone $zone of region '$targetLocation': $($restriction.ReasonCode)" `
-									"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 									-stopCondition $True
 			}
 		}
@@ -3278,8 +3279,7 @@ function test-vmQuota {
 		$script:AzVMUsage = Get-AzVMUsage `
 							-Location $region `
 							-ErrorAction	'SilentlyContinue'
-		test-cmdlet 'Get-AzVMUsage'  "Could not get quota for region '$region'" `
-					"You can skip this step using $pwshName parameter switch 'skipVmChecks'"
+		test-cmdlet 'Get-AzVMUsage'  "Could not get quota for region '$region'"
 	}
 
 	if ($Null -eq $script:quotaUsage) {
@@ -3397,7 +3397,6 @@ function test-diskSku {
 	if ($Null -eq $sku) {
 		write-logFileWarning "Disk Consistency check failed" `
 							"Disk SKU '$diskSku' not available in region '$targetLocation'" `
-							"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 							-stopCondition $True
 	}
 	$sku = $sku[0]
@@ -3406,7 +3405,6 @@ function test-diskSku {
 	if (($zone -gt 0) -and ($zone -notin $sku.LocationInfo.Zones)) {
 		write-logFileWarning "Disk Consistency check failed" `
 							"Disk SKU '$diskSku' not available in zone $zone of region '$targetLocation'" `
-							"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 							-stopCondition $True
 	}
 
@@ -3416,7 +3414,6 @@ function test-diskSku {
 		if ($targetLocation -in $restriction.RestrictionInfo.Locations) {
 			write-logFileWarning "Disk Consistency check failed" `
 							"Disk SKU '$diskSku' not available in region '$targetLocation': $($restriction.ReasonCode)" `
-							"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 							-stopCondition $True
 		}
 	}
@@ -3427,7 +3424,6 @@ function test-diskSku {
 		if (($zone -gt 0) -and ($zone -in $restriction.RestrictionInfo.Zones)) {
 			write-logFileWarning "Disk Consistency check failed" `
 								"Disk SKU '$diskSku' not available in zone $zone of region '$targetLocation': $($restriction.ReasonCode)" `
-								"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 								-stopCondition $True
 		}
 	}
@@ -3438,7 +3434,6 @@ function test-diskSku {
 		write-logFileWarning "Disk Consistency check failed" `
 							"Disk SKU '$diskSku' must be used for zonal deployment" `
 							"Use RGCOPY parameter setVmZone" `
-							"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 							-stopCondition $True
 	}
 }
@@ -3454,8 +3449,7 @@ function test-diskQuota {
 		$script:AzVMUsage = Get-AzVMUsage `
 							-Location $region `
 							-ErrorAction	'SilentlyContinue'
-		test-cmdlet 'Get-AzVMUsage'  "Could not get quota for region '$region'" `
-					"You can skip this step using $pwshName parameter switch 'skipVmChecks'"
+		test-cmdlet 'Get-AzVMUsage'  "Could not get quota for region '$region'"
 	}
 
 	$script:resourcesPerDiskSku.Values
@@ -3565,7 +3559,6 @@ function show-quota {
 			if($quota.Free -lt $quota.Needed) {
 				write-logFileWarning "Quota check failed" `
 									"Subscription quota for '$($quota.QuotaName)' not sufficient in region '$region'" `
-									"You can skip this check using $pwshName parameter switch 'skipVmChecks'" `
 									-stopCondition $True
 			}
 		}
@@ -3729,7 +3722,8 @@ function test-controlPlane {
 			show-azCopyInstructions
 		}
 		elseif (!$isAzure) {
-			write-logFile "Disk-copy is much faster when starting RGCOPY inside an Azure VM:" -ForegroundColor 'red'
+			write-logFile "AzCopy creates high network I/O. Therefore:" -ForegroundColor 'red'
+			write-logFile "+ Use an Azure VM with managed identity as control plane for RGCOPY"
 			show-azCopyInstructions
 		}
 	}
@@ -3738,22 +3732,20 @@ function test-controlPlane {
 #--------------------------------------------------------------
 function show-azCopyInstructions {
 #--------------------------------------------------------------
-	write-logFile "+ The VM should be located in either the source or the target region."
-	write-logFile "  The VM should have sufficient vCPUs."
-	write-logFile "  Each parallel running AzCopy job might consume a whole vCPU."
-	write-logFile "  Define AzCopy parallelism using RGCOPY parameter -maxDOP (0 is maximum)."
-	write-logFile "+ Make sure that Service Endpoint 'Microsoft.Storage.Global' is enabled for the VM subnet"
+	write-logFile "+ Make sure that Service Endpoint 'Microsoft.Storage.Global' is enabled for the VM subnet."
 	write-logFile "+ Make sure that the the managed identity has the following RBAC roles on subscription level:"
 	write-logFile "    Contributor"
 	write-logFile "    Storage Blob Data Contributor                    (needed for share-copy)"
 	write-logFile "    Storage File Data Privileged Contributor         (needed for share-copy)"
 	write-logFile "    Storage File Data SMB Share Elevated Contributor (needed for share-copy)"
-	write-logFile "+ Run connect-AzAccount inside the VM with parameters"
+	write-logFile "+ Run connect-AzAccount inside the VM with parameters:"
 	write-logFile "    -AuthScope 'Storage', -Identity, -AccountId <managed identity> -SubscriptionName <name>"
-	write-logFile "  For cross tenant copy, authenticate the user in the other tenant with connect-AzAccount"
+	write-logFile "  For cross tenant copy, authenticate the user in the other tenant with connect-AzAccount:"
 	write-logFile "    -AuthScope 'Storage', -DeviceAuth, -SubscriptionName <name2>"
-	write-logFile "+ Start RGCOPY in the control plane VM using parameters"
+	write-logFile "+ Start RGCOPY in the control plane VM using parameters:"
 	write-logFile "    -useAzCopy -sourceSubUser <managed identity> [-subnetIdControlPlane <id>] [-maxDOP 0]"
+	write-logFile "  maxDOP defines AzCopy parallelism (0 uses maximal parallelism)."
+	write-logFile "  subnetIdControlPlane might be needed if RGCOPY does not detect the subnet automatically"
 	write-logFile
 }
 
@@ -4423,10 +4415,13 @@ function save-copyDisks {
 			$diskZone = 0
 		}
 		else {
+			if ($disk.Zones.count -gt 1) {
+				write-logFileError "RGCOPY does not support multiple zones for disks"
+			}
 			$diskZone = $disk.Zones[0] -as [int]
-		}
-		if ($diskZone -notin @(1,2,3)) {
-			$diskZone = 0
+			if ($diskZone -notin @(1,2,3)) {
+				write-logFileError "RGCOPY does not support disk zone $diskZone"
+			}
 		}
 
 		# OsType
@@ -4551,10 +4546,13 @@ function save-copyVMs {
 			$vmZone = 0
 		}
 		else {
+			if ($vm.Zones.count -gt 1) {
+				write-logFileError "RGCOPY does not support multiple zones for VMs"
+			}	
 			$vmZone = $vm.Zones[0] -as [int]
-		}
-		if ($vmZone -notin @(1,2,3)) {
-			$vmZone = 0
+			if ($vmZone -notin @(1,2,3)) {
+				write-logFileError "RGCOPY does not support VM zone $vmZone"
+			}
 		}
 
 		# get PlatformFaultDomain
@@ -4764,6 +4762,29 @@ function get-targetVMs {
 }
 
 #--------------------------------------------------------------
+function test-disksTargetRG {
+#--------------------------------------------------------------
+	$targetDisks = @( Get-AzDisk `
+						-ResourceGroupName $targetRG `
+						-ErrorAction 'SilentlyContinue' )
+	test-cmdlet 'Get-AzDisk'  "Could not get disks of resource group $targetRG"
+
+	$script:copyDisks.Values
+	| Where-Object Skip -ne $True
+	| ForEach-Object {
+
+		$name = $_.Name
+		if ($defaultDiskName.Length -gt 0) {
+			$name = $defaultDiskName
+		}	
+
+		if ($name -in $targetDisks.Name) {
+			write-logFileError "Disk $name already exists in target RG"
+		}
+	}
+}
+
+#--------------------------------------------------------------
 function get-sourceVMs {
 #--------------------------------------------------------------
 
@@ -4879,7 +4900,6 @@ function get-sourceVMs {
 	get-diskCreationMethod
 	test-controlPlane
 	show-sourceVMs
-	update-paramMaxDOP
 
 	if ($createDisksManually) {
 		if ('createDisks' -in $boundParameterNames) {
@@ -4894,19 +4914,15 @@ function get-sourceVMs {
 	if ($fileCopyNeeded) {
 		assert-hashes "For the file copy feature, additional RGCOPY files are needed"
 	}
-}
 
-#--------------------------------------------------------------
-function update-paramMaxDOP {
-#--------------------------------------------------------------
-	if ($maxDOP -eq 0) {
+	# update parameter maxDOP
+	if ($copyMode -and ($maxDOP -eq 0)) {
+		# one thread for each vhd BLOB to copy
 		$script:maxDOP = @($script:copyDisks.Values
 							| Where-Object Skip -ne $true).Count
 
-		# increase maxDOP for copying meta and state BLOBs 
-		$script:maxDOP += 2 * @($script:copyDisks.Values
-									| Where-Object Skip -ne $true
-									| Where-Object SecurityType -like 'ConfidentialVM*').Count
+		# there is no need to increase maxDOP for copying meta and state BLOBs 
+		# because they are very small and copying them is therefore fast
 			
 		write-logFileWarning "Changing maxDOP=0 to maxDOP=$script:maxDOP"
 	}
@@ -5768,7 +5784,7 @@ function update-paramGeneralizedVMs {
 function update-paramSkipVMs {
 #--------------------------------------------------------------
 	# skipped VMs have already be marked in function save-copyVMs
-	$script:skipVMsUpdated = @()
+	$script:collectedSkipVMs = @()
 	$script:VMsRunning = $False
 
 	$script:copyVMs.Values
@@ -5784,10 +5800,10 @@ function update-paramSkipVMs {
 			$_.Skip = $True
 		}
 
-		# correct status and get $script:skipVMs
+		# correct status
 		if ($_.Skip -eq $True) {
 			$_.VmStatus = "skipped (will not be copied)"
-			$script:skipVMsUpdated += $_.Name
+			$script:collectedSkipVMs += $_.Name
 		}
 		# check for running VM with more than one disk/volume
 		elseif ($_.VmStatus -ne 'VM deallocated') {
@@ -6196,7 +6212,6 @@ function update-paramSetVmSize {
 		if ($diskCount -gt $diskCountMax) {
 			write-logFileWarning "VM consistency check failed" `
 								"Size '$vmSize' of VM '$vmName' only supports $diskCountMax data disk(s)" `
-								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'" `
 								-stopCondition $True
 		}
 
@@ -6206,7 +6221,6 @@ function update-paramSetVmSize {
 		if ($nicCount -gt $nicCountMax) {
 			write-logFileWarning "VM consistency check failed" `
 								"Size '$vmSize' of VM '$vmName' only supports $nicCountMax network interface(s)" `
-								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'" `
 								-stopCondition $True
 		}
 
@@ -6219,22 +6233,18 @@ function update-paramSetVmSize {
 		if ($hvGenAllowed -notlike "*$hvGen*") {
 			write-logFileWarning "VM consistency check failed" `
 								"HyperVGeneration '$hvGen' of VM '$vmName' not supported by VM size '$vmSize'" `
-								"You can skip this check using RGCOPY parameter switch 'skipVmChecks'" `
 								-stopCondition $True
 		}
 
 		# check CpuArchitectureType: 'x64', 'Arm64'
-		if (!$skipVmChecks) {
-			$cpuTypeOld = $script:vmSkus[$_.VmSizeOld].CpuArchitectureType
-			# old VM size might not be available in target region
-			if ($Null -ne $cpuTypeOld) {
-				$cpuTypeNew = $script:vmSkus[$_.VmSize].CpuArchitectureType
-				if ($cpuTypeOld -ne $cpuTypeNew) {
-					write-logFileWarning "Cannot change from CPU architecture '$cpuTypeOld' (VM size '$($_.VmSizeOld)')" `
-										"to CPU architecture '$cpuTypeNew' (VM size '$vmSize')" `
-										"You can skip this check using RGCOPY parameter switch 'skipVmChecks'" `
-										-stopCondition $True
-				}
+		$cpuTypeOld = $script:vmSkus[$_.VmSizeOld].CpuArchitectureType
+		# old VM size might not be available in target region
+		if ($Null -ne $cpuTypeOld) {
+			$cpuTypeNew = $script:vmSkus[$_.VmSize].CpuArchitectureType
+			if ($cpuTypeOld -ne $cpuTypeNew) {
+				write-logFileWarning "Cannot change from CPU architecture '$cpuTypeOld' (VM size '$($_.VmSizeOld)')" `
+									"to CPU architecture '$cpuTypeNew' (VM size '$vmSize')" `
+									-stopCondition $True
 			}
 		}
 	}
@@ -6295,7 +6305,9 @@ function update-paramSetDiskSku {
 		if ('setDiskSku' -notin $boundParameterNames) {
 			if ($current -notin @('Premium_LRS', 'StandardSSD_LRS', 'Standard_LRS')) {
 				$wanted = $current
-				write-logFileWarning "Not using default value 'Premium_LRS' for disks with SKU '$current'"
+				if (!$skipDefaultValues) {
+					write-logFileWarning "Not using default value 'Premium_LRS' for disks with SKU '$current'"
+				}
 			}
 		}
 
@@ -7825,17 +7837,27 @@ function remove-snapshots {
 	$rgType = get-rgType $resourceGroup
 	write-stepStart "DELETE SNAPSHOTS IN $rgType" $maxDOP -startMeasurement
 
+	$snapshots = @()
+	foreach ($name in $snapshotNames) {
+		$snapshots += @{
+			Name = $name
+			TotalMinutes = 0
+		}
+	}
+
 	#--------------------------------------------------------------
 	# create script and parameters
 	$scriptParameter = "`$resourceGroup = '$resourceGroup';"
 
 	$script = {
-		$SnapshotName = $_
-		Write-Output "... $SnapshotName"
+		$startTime = get-date
+		$snapshotName = $_.Name
+
+		Write-Output "... $snapshotName"
 		try {
 			Revoke-AzSnapshotAccess `
 				-ResourceGroupName  $resourceGroup `
-				-SnapshotName       $SnapshotName `
+				-SnapshotName       $snapshotName `
 				-WarningAction 'SilentlyContinue' `
 				-ErrorAction 'Stop' | Out-Null
 		}
@@ -7848,7 +7870,7 @@ function remove-snapshots {
 		try {
 			Remove-AzSnapshot `
 				-ResourceGroupName  $resourceGroup `
-				-SnapshotName      	$SnapshotName `
+				-SnapshotName      	$snapshotName `
 				-Force `
 				-WarningAction 'SilentlyContinue' `
 				-ErrorAction 'Stop' | Out-Null
@@ -7858,7 +7880,10 @@ function remove-snapshots {
 			# continue RGCOPY
 		}
 
-		Write-Output $SnapshotName
+		$endTime = get-date
+		$_.TotalMinutes = ($endTime - $startTime).TotalMinutes
+
+		Write-Output $snapshotName
 	}
 
 	#--------------------------------------------------------------
@@ -7866,7 +7891,7 @@ function remove-snapshots {
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	write-logFile "Removing snapshot..."
 
-	$snapshotNames
+	$snapshots
 	| ForEach-Object @param
 	| Tee-Object -FilePath $logPath -append
 	| Out-Host
@@ -7874,7 +7899,12 @@ function remove-snapshots {
 		write-logFileWarning "Deletion of snapshots failed in resource group '$resourceGroup'"
 	}
 
-	$script:stepTotalObjects = $snapshotNames.Count
+	$snapshots
+	| ForEach-Object {
+		$script:stepTotalObjects	+= 1
+		$script:stepTotalTime		+= $_.TotalMinutes
+	}
+
 	write-stepEnd -endMeasurement
 }
 
@@ -8406,7 +8436,6 @@ $ansiRed	= [char]27 + "[31m"
 $ansiGreen	= [char]27 + "[32m"
 $ansiYellow = [char]27 + "[33m"
 $ansiReset	= [char]27 + "[0m"
-
 #--------------------------------------------------------------
 function start-azCopyJobsBlobs {
 #--------------------------------------------------------------
@@ -8414,6 +8443,8 @@ function start-azCopyJobsBlobs {
 
 	$script:AzCopyJobs = @()
 	write-logfile "Starting AzCopy for blobs..."
+	get-controlPlaneStats
+	$script:controlPlaneStatsStart = $script:controlPlaneStats.clone()
 
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
@@ -8581,64 +8612,152 @@ function show-azCopyJobs {
 		name
 	| write-logFilePipe
 	# do not use Out-String because this remove the color in colomn state
+
+	show-controlPlaneStats
+}
+
+#--------------------------------------------------------------
+function get-controlPlaneStats {
+#--------------------------------------------------------------
+	if (!$IsLinux -and !$IsWindows) {
+		return $null
+	}
+
+	$script:controlPlaneStats = @{
+		Date = $null
+	}
+
+	try {
+		if ($IsLinux) {
+			$line = Get-Content '/proc/stat' -Head 1 -ErrorAction 'Stop'
+			$parts = $line -split '\s+'
+
+			[double] $user 		= $parts[1]
+			$user += $parts[2]	# includes nice
+			[double] $system 	= $parts[3]
+			[double] $idle 		= $parts[4]
+			[double] $total = 0
+			for ($i = 1; $i -lt $parts.Length; $i++) {
+				$total += $parts[$i]
+			}
+		
+			$script:controlPlaneStats = @{
+				Date	= Get-Date
+				RxBytes	= (Get-Content '/sys/class/net/ens1/statistics/rx_bytes' -ErrorAction 'Stop') -as [double]
+				TxBytes	= (Get-Content '/sys/class/net/ens1/statistics/tx_bytes' -ErrorAction 'Stop') -as [double]
+				User	= $user
+				System	= $system
+				Idle	= $idle
+				Total	= $total
+			}
+		}
+
+		if ($IsWindows) {
+			$raw = Get-CimInstance -ClassName 'Win32_PerfRawData_PerfOS_Processor' -Filter "Name='_Total'" -ErrorAction 'Stop'
+
+			$NetStats = Get-NetAdapterStatistics -ErrorAction 'Stop'
+
+			$script:controlPlaneStats = @{
+				Date		= Get-Date
+				RxBytes		= ($NetStats.ReceivedBytes | Measure-Object -Sum).Sum -as [double]
+				TxBytes		= ($NetStats.SentBytes     | Measure-Object -Sum).Sum -as [double]
+				User		= $raw.PercentUserTime			-as [double]
+				System		= $raw.PercentPrivilegedTime	-as [double]
+				Idle		= $raw.PercentIdleTime			-as [double]
+				Total		= $raw.Timestamp_Sys100NS		-as [double]
+			}
+		}
+	}
+	catch {
+		$script:controlPlaneStats = @{
+			Date = $null
+		}
+	}
+}
+
+#--------------------------------------------------------------
+function show-controlPlaneStats {
+#--------------------------------------------------------------
+	param (
+		$start
+	)
+
+	if (!$IsLinux -and !$IsWindows) {
+		return
+	}
+
+	if ($null -eq $start) {
+		# no start statistics are supplied: use current one
+		$start = $script:controlPlaneStats.clone()
+	}
+	# create new statistics and use them as end-stats
+	get-controlPlaneStats
+	$end = $script:controlPlaneStats.clone()
+	if (($null -eq $start.Date) -or ($null -eq $end.Date)) {
+		return
+	}
+
+	[string] $startTime = $start.Date.toString('HH:mm:ss')
+	[string] $endTime 	= $end.Date.toString('HH:mm:ss')
+	[double] $seconds 	= ($end.Date - $start.Date).TotalSeconds
+	if ($seconds -le 0) {
+		return
+	}
+
+	[double] $diff_total 	= $end.Total 	- $start.Total
+	[double] $diff_user		= $end.User 	- $start.User
+	[double] $diff_system 	= $end.System 	- $start.System
+	[double] $diff_idle   	= $end.Idle 	- $start.Idle
+	[double] $diff_rxBytes  = $end.RxBytes 	- $start.RxBytes
+	[double] $diff_txBytes  = $end.TxBytes 	- $start.TxBytes
+	[double] $total_MB		= ($diff_rxBytes + $diff_txBytes) / 1MB
+
+	if ($diff_total -le 0) {
+		return
+	}
+
+	@{
+		startTime  	= $startTime
+		endTime		= $endTime
+		pct_user   	= (($diff_user   / $diff_total) * 100)
+		pct_system 	= (($diff_system / $diff_total) * 100)
+		pct_idle   	= (($diff_idle   / $diff_total) * 100)
+		rx_KBperSec = $diff_rxBytes / 1KB / $seconds
+		tx_KBperSec = $diff_txBytes / 1KB / $seconds
+		total_MB	= $total_MB
+	} `
+	| Select-Object * `
+	| Format-Table `
+		@{ Name = $startTime	; Expression = { $_.endTime		            }; Width = 10 ; Alignment = 'Right'}, `
+		@{ Name = '%user'		; Expression = { "{0:F2}" -f $_.pct_user	}; Width = 10 ; Alignment = 'Right'}, `
+		@{ Name = '%system'		; Expression = { "{0:F2}" -f $_.pct_system	}; Width = 10 ; Alignment = 'Right'}, `
+		@{ Name = '%idle'		; Expression = { "{0:F2}" -f $_.pct_idle	}; Width = 10 ; Alignment = 'Right'}, `
+		@{ Name = 'rx KiB/sec'	; Expression = { "{0:F2}" -f $_.rx_KBperSec	}; Width = 10 ; Alignment = 'Right'}, `
+		@{ Name = 'tx KiB/sec'	; Expression = { "{0:F2}" -f $_.tx_KBperSec	}; Width = 10 ; Alignment = 'Right'}, `
+		@{ Name = 'total MiB'	; Expression = { "{0:F2}" -f $_.total_MB	}; Width = 10 ; Alignment = 'Right'} `
+	| Out-String -Width $screenWidthSmall `
+	| write-logFilePipe
 }
 
 #--------------------------------------------------------------
 function wait-azCopyJobs {
 #--------------------------------------------------------------
 	write-stepStart "WAITING FOR AZCOPY JOBS" -startMeasurement
-	if ($IsLinux -and $isAzure) {
-		try {
-			write-logFile "vCPUs: $(grep -c ^processor /proc/cpuinfo)"
-			write-logFile "NIC:   $(lspci | grep Ethernet)"
-		}
-		catch {}
-	}
+	write-logFile "$([Environment]::ProcessorCount) logical CPUs on control plane"
 
 	$runningJobs = $script:AzCopyJobs 
 					| Where-Object state -notin @('Completed', 'Failed', 'Stopped', 'MaxDopReached')
 
 	show-azCopyJobs
 	$firstRun = $true
+	write-logFile "waiting 10 seconds..."
 	Start-Sleep 10
+
 	while ($runningJobs.count -gt 0) {
 
 		if (!$firstRun) {
-			# wait up-to 5 minutes until state change
 			$timeout = 300
-			write-logFile
-
-			# calculating CPU stats
-			if ($IsLinux -and !$skipLinuxCpuStats) {
-				write-logFile "waiting up-to 5 minutes for running AzCopy jobs (First job started at $($script:stepStartTime.ToString('HH:mm:ss')))"
-				try {
-					# measure 30 seconds, 1 time
-					$bash = $(sar -u -n DEV 30 1 )
-					foreach ($line in $bash) {
-						if ($line -match '^[0-9]') {
-							if ($line -notlike 'Average*') {
-								write-logFile $line
-							}
-						}
-					}
-					# write-logFile "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz') waiting up-to 5 minutes for running AzCopy jobs"
-					# $bash = $(mpstat 30 1 | awk '/^[0-9]/{printf "%s\t\t%s\t%s\t%s\n",$3,$4,$5,$12}')
-					# write-logFile "                          $($bash[0])"
-					# write-logFile "average of 30 seconds     $($bash[1])"
-
-					# wait 30 seconds less (because that time is already used in calculating CPU stats)
-					$timeout -= 30
-				}
-				catch {
-					write-logFileWarning "Make sure that the sar (System Activity Reporter) command is installed" `
-										"or disable running sar using RGCOPY parameter 'skipLinuxCpuStats'"
-				}
-			}
-
-			else {
-				write-logFile "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz') waiting up-to 5 minutes for running AzCopy jobs" -ForegroundColor 'DarkGray'
-			}
-
+			write-logFile "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss \U\T\Cz') waiting up-to 5 minutes for running AzCopy jobs" -ForegroundColor 'DarkGray'	
 			Wait-Job -Id $runningJobs.jobObj.Id -Any -TimeOut $timeout | Out-Null
 		}
 		$firstRun = $false
@@ -8746,6 +8865,10 @@ function wait-azCopyJobs {
 		$script:stepTotalSizeGB += $j.sizeGB
 		$script:stepTotalTime += $j.minutes
 	}
+
+	write-logFile "Overall statistics while AzCopy was running"
+	show-controlPlaneStats $script:controlPlaneStatsStart
+
 	write-stepEnd -endMeasurement
 }
 
@@ -9823,28 +9946,6 @@ function new-disks {
 }
 
 #--------------------------------------------------------------
-function update-publicIPAddresses {
-#--------------------------------------------------------------
-	# set publicIPAddresses Standard/Static: needed in newer APIs for VMs in Availability Zone
-	$script:resourcesALL
-	| Where-Object type -eq 'Microsoft.Network/publicIPAddresses'
-	| ForEach-Object {
-
-		if ($_.sku.name -ne 'Standard') {
-			$_.sku = @{ name = 'Standard' }
-			write-logFileUpdates 'publicIPAddresses' $_.name 'set SKU' 'Standard'
-		}
-		if ($_.properties.publicIPAllocationMethod -ne 'Static') {
-			$_.properties.publicIPAllocationMethod = 'Static'
-			write-logFileUpdates 'publicIPAddresses' $_.name 'set AllocationMethod' 'Static'
-		}
-		if ($Null -ne $_.properties.ipAddress) {
-			$_.properties.ipAddress = $Null
-		}
-	}
-}
-
-#--------------------------------------------------------------
 function update-nics2skip {
 #--------------------------------------------------------------
 	# remove NICs in delegated subnets (NIC has to be created by delegation service)
@@ -9953,6 +10054,7 @@ function update-IpAllocationMethod {
 	| Where-Object type -eq 'Microsoft.Network/networkInterfaces'
 	| ForEach-Object {
 
+		# update privateIPAllocationMethod
 		$value = $script:paramValues[$_.name]
 		if ($Null -ne $value) {
 			test-values 'setPrivateIpAlloc' $value @('Dynamic', 'Static') 'allocation type'
@@ -9960,21 +10062,41 @@ function update-IpAllocationMethod {
 			for ($i = 0; $i -lt $_.properties.ipConfigurations.count; $i++) {
 				$ip = $_.properties.ipConfigurations[$i].properties.privateIPAddress
 
+				# change
 				if ($_.properties.ipConfigurations[$i].properties.privateIPAllocationMethod -ne $value) {
 
 					$_.properties.ipConfigurations[$i].properties.privateIPAllocationMethod = $value
 					write-logFileUpdates 'privateIPAddresses' $ip 'set Allocation Method' $value -valueWarning
 				}
+
+				# keep
 				else {
 					write-logFileUpdates 'privateIPAddresses' $ip 'keep Allocation Method' $value
 				}
 			}
 		}
 
-		# remove IP for dynamic allocation method
+		# correct privateIPAddress, privateIPAddressPrefixLength
 		for ($i = 0; $i -lt $_.properties.ipConfigurations.count; $i++) {
+			
+			# Dynamic
 			if ($_.properties.ipConfigurations[$i].properties.privateIPAllocationMethod -eq 'Dynamic') {
-				$_.properties.ipConfigurations[$i].properties.privateIPAddress = $Null
+				# calculate prefix
+				if ($null -eq $_.properties.ipConfigurations[$i].properties.privateIPAddressPrefixLength) {
+					$prefix = ($_.properties.ipConfigurations[$i].properties.privateIPAddress -split '/')[1]
+					if ($null -ne $prefix) {
+						$_.properties.ipConfigurations[$i].properties.privateIPAddressPrefixLength = ($prefix -as [int])
+					}
+				}
+
+				# remove privateIPAddress
+				$_.properties.ipConfigurations[$i].properties.privateIPAddress = $null
+			}
+
+			# Static
+			else {
+				# remove privateIPAddressPrefixLength
+				$_.properties.ipConfigurations[$i].properties.privateIPAddressPrefixLength = $null
 			}
 		}
 	}
@@ -10235,8 +10357,12 @@ function new-vmssFlex {
 
 			if ($vmssName.length -ne 0) {
 
+				$bicepName = get-bicepNameByType 'Microsoft.Compute/virtualMachineScaleSets' $vmssName
+				# for new resources, parameter collectReferences does not work
+				$_.bicepNamesReferenced += $bicepName
+
 				$_.properties.virtualMachineScaleSet = @{
-					id = "<$(get-bicepNameByType 'Microsoft.Compute/virtualMachineScaleSets' $vmssName).id>"
+					id = "<$bicepName.id>"
 				}
 				# save VMSS name
 				$script:copyVMs[$vmName].VmssName = $vmssName
@@ -10455,6 +10581,7 @@ function set-singlePlacementGroup {
 		@{label="FD Count";     expression={$_.platformFaultDomainCount}}, `
 		@{label="singlePlacementGroup"; expression={get-replacedOutput $_.singlePlacementGroup $Null}}
 	| Format-Table
+	| Out-String -Width $screenWidthSmall
 	| write-logFilePipe
 }
 
@@ -10658,8 +10785,12 @@ function new-availabilitySet {
 
 		if ($asName.length -ne 0) {
 
+			$bicepName = get-bicepNameByType 'Microsoft.Compute/availabilitySets' $asName
+			# for new resources, parameter collectReferences does not work
+			$_.bicepNamesReferenced += $bicepName
+
 			$_.properties.availabilitySet = @{
-				id = "<$(get-bicepNameByType 'Microsoft.Compute/availabilitySets' $asName).id>"
+				id = "<$bicepName.id>"
 			}
 
 			write-logFileUpdates 'virtualMachines' $vmName 'set availabilitySet' $asName
@@ -10667,8 +10798,12 @@ function new-availabilitySet {
 			# for each VM in AvSet: add PPG if AvSet is part of the PPG
 			if ($ppgName.length -ne 0) {
 
+				$bicepName = get-bicepNameByType 'Microsoft.Compute/proximityPlacementGroups' $ppgName
+				# for new resources, parameter collectReferences does not work
+				$_.bicepNamesReferenced += $bicepName
+
 				$_.properties.proximityPlacementGroup = @{
-					id = "<$(get-bicepNameByType 'Microsoft.Compute/proximityPlacementGroups' $ppgName).id>"
+					id = "<$bicepName.id>"
 				}
 				write-logFileUpdates 'virtualMachines' $vmName 'set proximityPlacementGroup' $ppgName
 			}
@@ -10712,9 +10847,13 @@ function update-proximityPlacementGroup {
 										"because it uses multiple zones"
 				}
 			}
+
+			$bicepName = get-bicepNameByType 'Microsoft.Compute/proximityPlacementGroups' $ppgName
+			# for new resources, parameter collectReferences does not work
+			$_.bicepNamesReferenced += $bicepName
 			
 			$_.properties.proximityPlacementGroup = @{
-				id = "<$(get-bicepNameByType 'Microsoft.Compute/proximityPlacementGroups' $ppgName).id>"
+				id = "<$bicepName.id>"
 			}
 			write-logFileUpdates $type $_.name 'set proximityPlacementGroup' $ppgName
 		}
@@ -10879,8 +11018,12 @@ function update-diskZone {
 		elseif ($Null -ne $defaultDiskZone) {
 			$diskZoneNew = $defaultDiskZone
 		}
+		# detached disk, but parameter defaultDiskZone not set
+		else {
+			write-logFileError "You must set parameter 'defaultDiskZone' when copying detached disks"
+		}
 
-		# just copy disks
+		# for just copy disks: parameter defaultDiskZone overrides zone setting
 		if ($justCopyDisks.count -ne 0) {
 			if ($Null -ne $defaultDiskZone) {
 				$diskZoneNew = $defaultDiskZone
@@ -10950,17 +11093,15 @@ function update-paramAll {
 #--------------------------------------------------------------
 function update-resourcesAll {
 #--------------------------------------------------------------
-	# remove zones and tags
-	update-zones
 	update-tags
 
 	# remove skipped resources 
-	$script:skipIPs  = @()
-	$script:skipNICs = @()
+	$script:collectedSkipIPs  = @()
+	$script:collectedSkipNICs = @()
 	update-skipVMsNICsIPs
-	remove-resources 'Microsoft.Compute/virtualMachines' $script:skipVMsUpdated
-	remove-resources 'Microsoft.Network/networkInterfaces' $script:skipNICs
-	remove-resources 'Microsoft.Network/publicIPAddresses' $script:skipIPs
+	remove-resources 'Microsoft.Compute/virtualMachines' $script:collectedSkipVMs
+	remove-resources 'Microsoft.Network/networkInterfaces' $script:collectedSkipNICs
+	remove-resources 'Microsoft.Network/publicIPAddresses' $script:collectedSkipIPs
 	
 	$script:vmssProperties = @{}
 	# merge/clone mode
@@ -11031,7 +11172,6 @@ function update-resourcesAll {
 	}
 
 	update-acceleratedNetworking
-	update-publicIPAddresses
 
 	update-SKUs
 	update-IpAllocationMethod
@@ -11434,10 +11574,14 @@ function add-disksNew {
 						caching					= 'None'
 						writeAcceleratorEnabled	= $False
 						toBeDetached			= $False
-					}	
+					}
+
+					$bicepName = get-bicepNameByType 'Microsoft.Compute/disks'	$diskName
+					# for new resources, parameter collectReferences does not work
+					$_.bicepNamesReferenced += $bicepName
 
 					$dataDisk.managedDisk = @{
-						id = "<$(get-bicepNameByType 'Microsoft.Compute/disks'	$diskName).id>"
+						id = "<$bicepName.id>"
 					}
 
 					# add disk
@@ -11680,8 +11824,12 @@ function update-images {
 	| Where-Object name -in $generalizedVMs
 	| ForEach-Object {
 
+		$bicepName = get-bicepNameByType 'Microsoft.Compute/images' $imageName
+		# for new resources, parameter collectReferences does not work
+		$_.bicepNamesReferenced += $bicepName
+
 		$_.properties.storageProfile.imageReference  = @{
-			id = "<$(get-bicepNameByType 'Microsoft.Compute/images' $imageName).id>"
+			id = "<$bicepName.id>"
 		}
 
 		# os disk
@@ -12541,7 +12689,9 @@ function invoke-localScript {
 	}
 
 	set-rgcopyParam
-	if ($verboseLog) { write-logFileHashTable $script:rgcopyParamOrig }
+	if ($verboseLog) {
+		write-logFileHashTable $script:rgcopyParamOrig
+	}
 
 	# convert named parameters to position parameters
 	[array] $keys   = $script:rgcopyParamOrig.keys
@@ -13118,24 +13268,6 @@ function update-storageAccounts {
 }
 
 #--------------------------------------------------------------
-function update-zones {
-#--------------------------------------------------------------
-	# remove zones
-	$script:resourcesALL
-	| ForEach-Object {
-
-		$type = ($_.type -split '/')[1]
-		if ( ($Null -ne $_.zones) `
-		-and ($_.type -ne 'Microsoft.Compute/virtualMachines') `
-		-and ($_.type -notlike 'Microsoft.Compute/virtualMachineScaleSets*' )) {
-
-			write-logFileUpdates $type $_.name 'delete Zones'
-			$_.zones = $Null
-		}
-	}
-}
-
-#--------------------------------------------------------------
 function update-tags {
 #--------------------------------------------------------------
 	# remove tags
@@ -13254,6 +13386,10 @@ function show-defaultValues {
 #--------------------------------------------------------------
 function show-warningDefaultValues {
 #--------------------------------------------------------------
+	if ($skipDefaultValues) {
+		return
+	}
+
 	$parlist = @(
 		'setDiskSku'
 		'setVmZone'
@@ -13275,6 +13411,9 @@ function show-warningDefaultValues {
 			show-defaultValues $p
 		}
 		write-logFile
+		write-logFile "You can disable default values by setting parameter 'skipDefaultValues'"
+		write-logFile "or by setting the above parameters explicitly to a different value."
+		write-logFile
 		write-logFile
 	}
 
@@ -13293,6 +13432,10 @@ function new-templateBicep {
 	# get zones from targetRG
 	get-skuProperties
 	$script:allTargetZones = $script:skuProperties.LocationInfo.Zones | Sort-Object -Unique
+	# special case: region eastus2euap has zone 4
+	if ($script:allTargetZones.count -notin @(1, 2, 3)) {
+		$script:allTargetZones = @()
+	}
 
 	# --- start output resource changes
 	Write-logFile 'Resource                                     Changes by RGCOPY' -ForegroundColor 'Green'
@@ -13304,7 +13447,7 @@ function new-templateBicep {
 	add-az_privateEndpoints
 	add-az_virtualNetworks
 	add-az_networkInterfaces
-	add-az_publicIPAddresses
+	
 	add-az_networkSecurityGroups
 	add-az_applicationSecurityGroups
 	add-az_bastionHosts
@@ -13313,8 +13456,9 @@ function new-templateBicep {
 		add-az_dnsZones
 	}
 	add-az_privateDnsZones
-	add-az_publicIPPrefixes
 	add-az_natGateways
+	add-az_publicIPPrefixes
+	add-az_publicIPAddresses
 	add-az_proximityPlacementGroups
 	add-az_availabilitySets
 	add-az_virtualMachineScaleSet
@@ -13391,18 +13535,18 @@ function write-changedByDefault {
 function update-skipVMsNICsIPs {
 #--------------------------------------------------------------
 	# output of skipped VMs
-	foreach ($vm in $script:skipVMs) {
+	foreach ($vm in $script:collectedSkipVMs) {
 		if (!$cloneOrMergeMode) {
 			write-logFileUpdates 'virtualMachines' $vm 'skip VM'
 		}
 	}
 
 	$script:copyVMs.Values
-	| Where-Object Name -in $script:skipVMsUpdated
+	| Where-Object Name -in $script:collectedSkipVMs
 	| ForEach-Object {
 
-		$script:skipNICs += $_.NicNames
-		$script:skipIPs  += $_.IpNames
+		$script:collectedSkipNICs += $_.NicNames
+		$script:collectedSkipIPs  += $_.IpNames
 	}
 }
 
@@ -13721,21 +13865,20 @@ function stop-VMs {
 #--------------------------------------------------------------
 	param (
 		$resourceGroup,
-		$VMs
+		$vmObjects
 	)
 
 	$rgType = get-rgType $resourceGroup
 	write-stepStart "STOP VMs IN $rgType" $maxDOP -startMeasurement
 
-	$VmNames = ($VMs | Where-Object PowerState -ne 'VM deallocated').Name
+	$vmNames = ($vmObjects | Where-Object PowerState -ne 'VM deallocated').Name
 	if ($VmNames.count -eq 0) {
 		write-logFile "All VMs are already stopped"
 	}
 	else {
-		stop-parallelVMs $resourceGroup $VmNames
+		stop-parallelVMs $resourceGroup $vmNames
 	}
 
-	$script:stepTotalObjects = $VmNames.count
 	write-stepEnd -endMeasurement
 }
 
@@ -13744,33 +13887,47 @@ function stop-parallelVMs {
 #--------------------------------------------------------------
 	param (
 		$resourceGroup,
-		$VmNames
+		$vmNames,
+		[switch] $skipMeasurement
 	)
 
-	$VmNames = $VmNames | Sort-Object -Unique
+	$vmNames = $vmNames | Sort-Object -Unique
+
+	$VMs = @()
+	foreach ($name in $vmNames) {
+		$VMs += @{
+			Name = $name
+			TotalMinutes = 0
+		}
+	}
 
 	#--------------------------------------------------------------
 	# create script and parameters
 	$scriptParameter =  "`$resourceGroup = '$resourceGroup';"
 
 	$script = {
+		$startTime = get-date
+		$vmName = $_.Name
 
-		Write-Output "... $($_)"
+		Write-Output "... $vmName"
 
 		try {
 			Stop-AzVM `
 				-Force `
-				-Name 				$_ `
+				-Name 				$vmName `
 				-ResourceGroupName 	$resourceGroup `
 				-WarningAction 'SilentlyContinue' `
 				-ErrorAction 'Stop' | Out-Null
 		}
 		catch {
 			Write-Output "---> $($error[0] -as [string])"
-			throw "Could not stop VM $($_)"
+			throw "Could not stop VM $vmName"
 		}
 
-		Write-Output "$($_)"
+		$endTime = get-date
+		$_.TotalMinutes = ($endTime - $startTime).TotalMinutes
+
+		Write-Output $vmName
 	}
 
 	#--------------------------------------------------------------
@@ -13778,7 +13935,7 @@ function stop-parallelVMs {
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
 	write-logFile "Stopping VM..."
 
-	$VmNames
+	$VMs
 	| ForEach-Object @param
 	| Tee-Object -FilePath $logPath -append
 	| Out-Host
@@ -13786,6 +13943,14 @@ function stop-parallelVMs {
 	if (!$?) {
 		write-logFileError "Could not stop VMs in resource group $resourceGroup" `
 							"Stop-AzVM failed"
+	}
+
+	if (!$skipMeasurement) {
+		$VMs
+		| ForEach-Object {
+			$script:stepTotalObjects	+= 1
+			$script:stepTotalTime		+= $_.TotalMinutes
+		}
 	}
 }
 
@@ -14065,6 +14230,7 @@ function get-allFromTags {
 	| Sort-Object vmName, tagName
 	| Select-Object vmName, tagName, value,  paramName, paramSet
 	| Format-Table
+	| Out-String -Width $screenWidthLarge
 	| write-logFilePipe
 
 	if ($script:rgcopyTags.count -eq 0) {
@@ -14675,8 +14841,7 @@ function new-resourceGroup {
 		write-logFileTab 'Resource Group' $targetRG 'already exists'
 
 		if (($currentRG.Location -ne $targetLocation) -and !$skipVmChecks) {
-			write-logFileError "Resource Group '$targetRG' is not in region '$targetLocation'" `
-								"You can skip this check using $pwshName parameter switch 'skipVmChecks'"
+			write-logFileError "Resource Group '$targetRG' is not in region '$targetLocation'"
 		}
 
 		if ( !$allowExistingDisks `
@@ -14724,6 +14889,11 @@ function new-resourceGroup {
 		test-cmdlet 'New-AzResourceGroup'  "Could not create resource Group $targetRG"
 
 		write-logFileTab 'Resource Group' $targetRG 'created'
+	}
+
+	# check if same disk does not already exists in target RG
+	if ($justCopyDisks.count -ne 0) {
+		test-disksTargetRG
 	}
 	
 	# CREATE storage account
@@ -15344,9 +15514,7 @@ function test-justCopyBlobsSnapshotsDisks {
 		# 'pathExportFolder'
 		# 'hostPlainText'
 		# 'maxDOP'
-		# 'verboseLog'
 # error handling		
-		# 'skipVmChecks'
 		# 'forceVmChecks'
 		# 'useNewVmSizes'
 # RG parameters
@@ -15417,7 +15585,6 @@ function test-justCopyBlobsSnapshotsDisks {
 		'ignoreTags'
 		# 'copyDetachedDisks'
 		'jumpboxName'
-		'skipDefaultValues'
 		# 'defaultDiskZone'
 		# 'defaultDiskName'
 # BLOB copy
@@ -15650,9 +15817,7 @@ function test-mergeMode {
 		# 'pathExportFolder'
 		# 'hostPlainText'
 		'maxDOP'
-		# 'verboseLog'
 # error handling		
-		# 'skipVmChecks'
 		# 'forceVmChecks'
 		# 'useNewVmSizes'
 # RG parameters
@@ -15723,7 +15888,6 @@ function test-mergeMode {
 		'ignoreTags'
 		'copyDetachedDisks'
 		'jumpboxName'
-		'skipDefaultValues'
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
@@ -15840,9 +16004,7 @@ function test-cloneMode {
 		# 'pathExportFolder'
 		# 'hostPlainText'
 		'maxDOP'
-		# 'verboseLog'
 # error handling		
-		# 'skipVmChecks'
 		# 'forceVmChecks'
 		# 'useNewVmSizes'
 # RG parameters
@@ -15913,7 +16075,6 @@ function test-cloneMode {
 		'ignoreTags'
 		'copyDetachedDisks'
 		'jumpboxName'
-		'skipDefaultValues'
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
@@ -16068,9 +16229,7 @@ function test-archiveMode {
 		# 'pathExportFolder'
 		# 'hostPlainText'
 		# 'maxDOP'
-		# 'verboseLog'
 # error handling		
-		# 'skipVmChecks'
 		# 'forceVmChecks'
 		# 'useNewVmSizes'
 # RG parameters
@@ -16141,7 +16300,6 @@ function test-archiveMode {
 		'ignoreTags'
 		# 'copyDetachedDisks'
 		'jumpboxName'
-		'skipDefaultValues'
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
@@ -16250,9 +16408,7 @@ function test-updateMode {
 		'pathExportFolder'
 		# 'hostPlainText'
 		'maxDOP'
-		# 'verboseLog'
 # error handling		
-		# 'skipVmChecks'
 		# 'forceVmChecks'
 		# 'useNewVmSizes'
 # RG parameters
@@ -16323,7 +16479,6 @@ function test-updateMode {
 		'ignoreTags'
 		'copyDetachedDisks'
 		'jumpboxName'
-		# 'skipDefaultValues'
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
@@ -16432,9 +16587,7 @@ if (!$patchMode) {
 		'pathExportFolder'
 		# 'hostPlainText'
 		'maxDOP'
-		# 'verboseLog'
 # error handling		
-		# 'skipVmChecks'
 		'forceVmChecks'
 		'useNewVmSizes'
 # RG parameters
@@ -16505,7 +16658,6 @@ if (!$patchMode) {
 		'ignoreTags'
 		'copyDetachedDisks'
 		'jumpboxName'
-		'skipDefaultValues'
 		'defaultDiskZone'
 		'defaultDiskName'
 # BLOB copy
@@ -16611,9 +16763,7 @@ function test-copyMode {
 		# 'pathExportFolder'
 		# 'hostPlainText'
 		# 'maxDOP'
-		# 'verboseLog'
 # error handling		
-		# 'skipVmChecks'
 		# 'forceVmChecks'
 		# 'useNewVmSizes'
 # RG parameters
@@ -16684,7 +16834,6 @@ function test-copyMode {
 		# 'ignoreTags'
 		# 'copyDetachedDisks'
 		# 'jumpboxName'
-		# 'skipDefaultValues'
 		# 'defaultDiskZone'
 		# 'defaultDiskName'
 # BLOB copy
@@ -18557,7 +18706,8 @@ function get-bicepNameByType {
 	# from full qualified resource type and name
 	param (
 		$type,	# multi-part type, e.g. 'Microsoft.Storage/storageAccounts/blobServices'
-		$name	# multi-part name. e.g. 'saName/srvName'
+		$name,	# multi-part name. e.g. 'saName/srvName'
+		[switch] $collectReferences
 	)
 
 	# single-part type and name
@@ -18567,6 +18717,15 @@ function get-bicepNameByType {
 		write-logFileError "Internal RGCOPY error in 'get-bicepNameByType'" `
 							"type = $type" `
 							"name = $name"
+	}
+
+	if ($typeParts.count -eq 2) {
+		# MAIN resource
+		$bicepNameMain = $null
+	}
+	else {
+		# SUB resource (at least 3 type parts)
+		$bicepNameMain = get-bicepNameByType ($typeParts[0..1] -join '/') ($nameParts[0])
 	}
 
 	# maximum length of bicep name: 128
@@ -18629,6 +18788,18 @@ function get-bicepNameByType {
 		} 
 	}
 
+	# collect references to other MAIN resources
+	# collected bicep name might not exist in final bicep template
+	if ($collectReferences) {
+		if ($null -eq $bicepNameMain) {
+			$bicepNameMain = $bicepName
+		}
+
+		if ($null -ne $script:bicepNamesReferenced) {
+			$script:bicepNamesReferenced += $bicepNameMain
+		}
+	}
+
 	return $bicepName
 }
 
@@ -18640,7 +18811,8 @@ function get-bicepNameById {
 	# When $useMainResource is set, the sub-resorce part if the ID is ignored
 	param (
 		$id, # id of main-resource or sub-resource
-		[switch] $useMainResource
+		[switch] $useMainResource,
+		[switch] $collectReferences
 	)
 
 	# no reference to resource => nothing to add in BICEP template
@@ -18663,7 +18835,12 @@ function get-bicepNameById {
 		}
 	}
 
-	return (get-bicepNameByType $type $name)
+	if ($collectReferences) {
+		return (get-bicepNameByType $type $name -collectReferences)
+	}
+	else {
+		return (get-bicepNameByType $type $name)
+	}
 }
 
 #--------------------------------------------------------------
@@ -18708,6 +18885,12 @@ function get-bicepReference {
 
 	$bicepIdMain	= "<resourceId($rg'$($r.resourceArea)/$($r.mainResourceType)', '$($r.mainResourceName)')>"
 	$bicepId		= "<resourceId($rg'$($r.resourceArea)/$($r.mainResourceType)/$($r.subResourceType)', '$($r.mainResourceName)', '$($r.subResourceName)')>"
+
+	# collect references to other MAIN resources
+	# collected bicep name might not exist in final bicep template
+	if ($null -ne $script:bicepNamesReferenced) {
+		$script:bicepNamesReferenced += $bicepNameMain
+	}
 
 	#--------------------------------------------------------------
 	# main-resource
@@ -18782,6 +18965,7 @@ function add-bicepResource {
 		# new resource
 		$textArray += ''
 
+		# resource header
 		if ($existing) {
 			$textArray += "resource $bicepName '$($res.type)@$($res.apiVersion)' existing = {"
 		}
@@ -18863,7 +19047,11 @@ function add-bicepResource {
 					}
 				}
 
-				if ($key -in @( 'if', 'type', 'apiVersion', 'resourceGroupName', 'bicepName')) {
+				# ignore the following keys:
+				# 'if', 'bicepName', 'type', 'apiVersion': already processes in resource header
+				# 'resourceGroupName':    internal property for RGCOPY
+				# 'bicepNamesReferenced': internal property for RGCOPY
+				if ($key -in @( 'if', 'type', 'apiVersion', 'resourceGroupName', 'bicepName', 'bicepNamesReferenced')) {
 					continue
 				}
 
@@ -19027,18 +19215,26 @@ function add-bicepResource {
 function add-resourcesALL {
 #--------------------------------------------------------------
 	param (
-		$resource,
-		$az_res,
-		$resName,
-		$bicepResName,
+		$resource,				# 1st. parameter
+		$az_res,				# 2nd. parameter (optional)
+		$resName,				# parameter name must be explicitly set
+		$bicepResName,			# parameter name must be explicitly set
 		[switch] $noRegion,
 		[switch] $regionGlobal,
 		[switch] $noZones
 	)
 
+	$resource.bicepNamesReferenced = @()
+
 	#--------------------------------------------------------------
 	# resource read by cmdlet (two parameters provided)
 	if ($Null -ne $az_res) {
+
+		# in functions add-az_*, references are collected in script variable $script:bicepNamesReferenced
+		if ($null -ne $script:bicepNamesReferenced) {
+			$resource.bicepNamesReferenced = $script:bicepNamesReferenced
+		}
+
 		$resource.name 				= $az_res.Name
 		$resource.resourceGroupName	= $az_res.ResourceGroupName
 
@@ -19103,7 +19299,6 @@ function add-resourcesALL {
 	
 	# save resource
 	$script:resourcesALL += $resource
-	$script:lastBicepName = $resource.bicepName
 }
 
 #--------------------------------------------------------------
@@ -19207,28 +19402,33 @@ function get-supportedZones {
 		$azZones
 	)
 
-	if ($azZones.Count -eq 0) {
+	$currentZones = @($azZones| Sort-Object -Unique)
+	if ($currentZones.Count -eq 0) {
+		# no zone defined in source -> no zone in target
 		return $null
 	}
 
-	$showWarning = $false
-
-	if ($azZones.Count -ne $script:allTargetZones.Count) {
-		$showWarning = $true
+	# any zone defined in source -> all available zones in target
+	$changeNeeded = $false
+	if ($currentZones.Count -ne $script:allTargetZones.Count) {
+		$changeNeeded = $true
 	}
-
-	foreach ($zone in $azZones) {
-		if ($zone -notin $script:allTargetZones) {
-			$showWarning = $true
+	else {
+		for ($i = 0; $i -lt $script:allTargetZones.Count; $i++) {
+			if ($script:allTargetZones[$i] -ne $currentZones[$i]) {
+				$changeNeeded = $true
+			}
 		}
 	}
 
-	if ($showWarning) {
-		write-logFileWarning "Property 'zones' set in source RG but skipped by RGCOPY" `
-							"Resoure: '$resType/$resName', zones: $($azZones -as [string])"`
+	if ($changeNeeded) {
+		write-logFileUpdates $resType $resName 'set Zones' ($script:allTargetZones -as [string]) -valueWarning
+		return ,$script:allTargetZones # comma: do not convert [array] with 0 or 1 elements to scalar
 	}
-
-	return ,$script:allTargetZones 	# comma: do not convert [array] with 0 or 1 elements to scalar
+	else {
+		write-logFileUpdates $resType $resName 'keep Zones' ($currentZones -as [string])
+		return ,$currentZones # comma: do not convert [array] with 0 or 1 elements to scalar
+	}
 }
 
 #--------------------------------------------------------------
@@ -19350,12 +19550,13 @@ function add-az_virtualMachines {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'vm'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		#--------------------------------------------------------------
 		# OS disk
 		$disk = $az_res.StorageProfile.OsDisk
-		$bicepName = get-bicepNameByType 'Microsoft.Compute/disks' $disk.Name
+		$bicepName = get-bicepNameByType 'Microsoft.Compute/disks' $disk.Name -collectReferences
 
 		$osDisk				= @{
 			name					= $disk.Name
@@ -19373,7 +19574,7 @@ function add-az_virtualMachines {
 		# data disks
 		$dataDisks = @()
 		foreach ($disk in $az_res.StorageProfile.DataDisks) {
-			$bicepName = get-bicepNameByType 'Microsoft.Compute/disks' $disk.Name
+			$bicepName = get-bicepNameByType 'Microsoft.Compute/disks' $disk.Name -collectReferences
 
 			$dataDisks += @{
 				name					= $disk.Name
@@ -19411,7 +19612,7 @@ function add-az_virtualMachines {
 					deleteOption	= convertTo-String $nic.DeleteOption
 					primary			= convertTo-Boolean $nic.Primary
 				}
-				id = "<$(get-bicepNameById $nic.Id).id>"
+				id = "<$(get-bicepNameById $nic.Id -collectReferences).id>"
 			}
 		}
 
@@ -19575,11 +19776,17 @@ function add-az_virtualNetworks {
 					# sharingScope
 				}
 			}
+
+			if ($copyVMsOnly) {
+				$subnet.properties.networkSecurityGroup = $null
+			}
+
 			$subnets += $subnet
 
 			#========================================
 			$script:testResourceName = $sub.Name
 			$script:testResourceType = 'subnet'
+			$script:bicepNamesReferenced = @()
 			#========================================
 
 			test-property -unknownProperty 'applicationGatewayIPConfigurations'
@@ -19593,6 +19800,7 @@ function add-az_virtualNetworks {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'vnet'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		# dhcpOptions
@@ -19664,6 +19872,7 @@ function add-az_networkInterfaces {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'nic'
+		$script:bicepNamesReferenced = @()
 		#========================================
 		$ipConfigurations = @()
 		$dependsOn = @()
@@ -19685,8 +19894,10 @@ function add-az_networkInterfaces {
 
 			#applicationSecurityGroups
 			$applicationSecurityGroups = @()
-			foreach ($item in $conf.ApplicationSecurityGroups) {
-				$applicationSecurityGroups += get-bicepReference $item.Id
+			if (!$copyVMsOnly) {
+				foreach ($item in $conf.ApplicationSecurityGroups) {
+					$applicationSecurityGroups += get-bicepReference $item.Id
+				}
 			}
 
 			$ipConfig = @{
@@ -19702,7 +19913,7 @@ function add-az_networkInterfaces {
 				# always set allocation method static in RGCOPY
 					privateIPAllocationMethod		= convertTo-String $conf.PrivateIpAllocationMethod
 					privateIPAddress				= convertTo-String $conf.PrivateIpAddress
-					# privateIPAddressPrefixLength	= $conf.PrivateIpAddressPrefixLength	# not used for Static
+					privateIPAddressPrefixLength	= $conf.PrivateIpAddressPrefixLength	# [int]
 					privateIPAddressVersion			= convertTo-String $conf.PrivateIpAddressVersion
 					
 					publicIPAddress					= get-bicepReference $conf.PublicIpAddress.Id
@@ -19753,6 +19964,10 @@ function add-az_networkInterfaces {
 			}
 		}
 
+		if ($copyVMsOnly) {
+			$resource.properties.networkSecurityGroup = $null
+		}
+
 		test-property -displayProperty 'migrationPhase'
 		test-property -unknownProperty 'nicType'
 		test-property -unknownProperty 'workloadType'
@@ -19772,6 +19987,7 @@ function add-az_publicIPAddresses {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'ipAddress'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		# ddosProtectionPlan
@@ -19797,7 +20013,7 @@ function add-az_publicIPAddresses {
 			apiVersion	= '2025-05-01'
 			# name, location, extendedLocation, placement, tags, zones:		set in add-resourcesALL
 
-			sku			= @{
+			sku	= @{
 				name 						= convertTo-String $az_res.Sku.Name
 				tier 						= convertTo-String $az_res.Sku.Tier
 			}
@@ -19819,6 +20035,24 @@ function add-az_publicIPAddresses {
 				# servicePublicIPAddress
 			}
 		}
+
+		# no new 'Basic' SKU IP addresses supported  by Azure
+		if ($resource.sku.name -eq 'Basic') {
+			$resource.sku.name = 'Standard'
+			write-logFileWarning "'Basic' publicIPAddresses not supported, changing to 'Standard'"
+		}
+
+		# no new dynamic public IP addresses supported  by Azure
+		if ($resource.properties.publicIPAllocationMethod -eq 'Dynamic') {
+			$resource.properties.publicIPAllocationMethod  = 'Static'
+			write-logFileWarning "'Dynamic' publicIPAllocationMethod not supported, changing to 'Static'"
+		}
+
+		# CannotSpecifyBothTagsAndPublicIpPrefixForPublicIpAddress
+		if ($null -ne $resource.properties.publicIPPrefix.Id) {
+			$resource.properties.ipTags = $null
+		}
+
 		add-resourcesALL $resource $az_res
 
 		test-property -unknownProperty 'deleteOption' # Belongs to VM
@@ -19839,6 +20073,7 @@ function add-az_publicIPPrefixes {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'ipPrefix'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		#--------------------------------------------------------------
@@ -19876,6 +20111,7 @@ function add-az_natGateways {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'natGateway'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$publicIpAddresses = @()
@@ -19929,11 +20165,16 @@ function add-az_natGateways {
 #--------------------------------------------------------------
 function add-az_routeTables {
 #--------------------------------------------------------------
+	if ($copyVMsOnly) {
+		return
+	}
+
 	foreach ($az_res in $script:az_routeTables) {
 
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'routeTable'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$routes = @()
@@ -19967,11 +20208,16 @@ function add-az_routeTables {
 #--------------------------------------------------------------
 function add-az_applicationSecurityGroups {
 #--------------------------------------------------------------
+	if ($copyVMsOnly) {
+		return
+	}
+
 	foreach ($az_res in $script:az_applicationSecurityGroups) {
 
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'appSecGroup'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		# create resource
@@ -19990,11 +20236,16 @@ function add-az_applicationSecurityGroups {
 #--------------------------------------------------------------
 function add-az_networkSecurityGroups {
 #--------------------------------------------------------------
+	if ($copyVMsOnly) {
+		return
+	}
+
 	foreach ($az_res in $script:az_networkSecurityGroups) {
 
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'nwSecGroup'
+		$script:bicepNamesReferenced = @()
 		#========================================
 		
 		$securityRules = @()
@@ -20063,7 +20314,7 @@ function add-az_networkSecurityGroups {
 #--------------------------------------------------------------
 function add-az_bastionHosts {
 #--------------------------------------------------------------
-	if ($skipBastion) {
+	if ($skipBastion -or $copyVMsOnly) {
 		return
 	}
 
@@ -20072,6 +20323,7 @@ function add-az_bastionHosts {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'bastion'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$dependsOn = @()
@@ -20095,7 +20347,7 @@ function add-az_bastionHosts {
 		$resource = @{
 			type 			= 'Microsoft.Network/bastionHosts'
 			apiVersion		= '2025-05-01'
-			zones 			= get-supportedZones 'ipAddress' $az_res.Name $az_res.Zones
+			zones 			= get-supportedZones 'bastion' $az_res.Name $az_res.Zones
 			dependsOn 		= $dependsOn 
 			# name, location, extendedLocation, placement, tags, zones:		set in add-resourcesALL
 
@@ -20136,6 +20388,7 @@ function add-az_availabilitySets {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'avSet'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		# create resource
@@ -20171,6 +20424,7 @@ function add-az_proximityPlacementGroups {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'ppg'
+		$script:bicepNamesReferenced = @()
 		#========================================	
 
 		# create resource
@@ -20201,6 +20455,7 @@ function add-az_virtualMachineScaleSet {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'vmss'
+		$script:bicepNamesReferenced = @()
 		#========================================
 		$orchestrationMode = convertTo-String $az_res.OrchestrationMode 
 
@@ -20279,6 +20534,7 @@ function add-az_loadBalancers {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'lb'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$backendAddressPools = @()
@@ -20516,12 +20772,17 @@ function add-az_loadBalancers {
 #--------------------------------------------------------------
 function add-az_storageAccounts {
 #--------------------------------------------------------------
+	if ($copyVMsOnly) {
+		return
+	}
+
 	# parent resource
 	foreach ($az_res in $script:az_storageAccounts) {
 
 		#========================================
 		$script:testResourceName = $az_res.StorageAccountName
 		$script:testResourceType = 'sa'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		if ($skipSaNwRules) {
@@ -20664,6 +20925,7 @@ function add-az_storageAccounts {
 		#========================================
 		$script:testResourceName = $parentName
 		$script:testResourceType = 'saFileService'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$resource = @{
@@ -20711,6 +20973,7 @@ function add-az_storageAccounts {
 		#========================================
 		$script:testResourceName = $parentName
 		$script:testResourceType = 'saBlobService'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$resource = @{
@@ -20776,6 +21039,7 @@ function add-az_storageAccounts {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'saBlobContainer'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 
@@ -20824,6 +21088,7 @@ function add-az_storageAccounts {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'saFileShare'
+		$script:bicepNamesReferenced = @()
 		#========================================	
 
 		$resource = @{
@@ -20858,11 +21123,16 @@ function add-az_storageAccounts {
 #--------------------------------------------------------------
 function add-az_privateEndpoints {
 #--------------------------------------------------------------
+	if ($copyVMsOnly) {
+		return
+	}
+
 	foreach ($az_res in $script:az_privateEndpoints) {
 
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'endpoint'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		#--------------------------------------------------------------
@@ -21046,11 +21316,16 @@ function add-az_privateEndpoints {
 #--------------------------------------------------------------
 function add-az_dnsZones {
 #--------------------------------------------------------------
+	if ($copyVMsOnly) {
+		return
+	}
+
 	foreach ($az_res in $script:az_dnsZones) {
 
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'dnsZone'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$registrationVirtualNetworks = @()
@@ -21084,6 +21359,7 @@ function add-az_dnsZones {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'dnsZoneRS'
+		$script:bicepNamesReferenced = @()
 		#========================================
 		$recordType = convertTo-String $az_res.RecordType
 		$parentName = convertTo-String $az_res.ZoneName
@@ -21347,12 +21623,17 @@ function add-az_dnsRecords {
 #--------------------------------------------------------------
 function add-az_privateDnsZones {
 #--------------------------------------------------------------
+	if ($copyVMsOnly) {
+		return
+	}
+
 	# privateDnsZones
 	foreach ($az_res in $script:az_privateDnsZones) {
 
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'privDnsZone'
+		$script:bicepNamesReferenced = @()
 		#========================================
 
 		$resource = @{
@@ -21372,6 +21653,7 @@ function add-az_privateDnsZones {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'privDnsZoneRS'
+		$script:bicepNamesReferenced = @()
 		#========================================
 		$recordType = convertTo-String $az_res.RecordType
 		$parentName = convertTo-String $az_res.ZoneName
@@ -21427,6 +21709,7 @@ function add-az_privateDnsZones {
 		#========================================
 		$script:testResourceName = $az_res.Name
 		$script:testResourceType = 'privDnsZoneNwLink'
+		$script:bicepNamesReferenced = @()
 		#========================================
 		$parentName = (get-resourceComponents $az_res.ResourceId).mainResourceName
 
@@ -21508,7 +21791,7 @@ function step-prepareClone {
 }
 
 #--------------------------------------------------------------
-function step-armTemplate {
+function step-bicepTemplate {
 #--------------------------------------------------------------
 	if ($skipArmTemplate -and ($justCopyDisks.count -eq 0)) {
 		return
@@ -21517,10 +21800,6 @@ function step-armTemplate {
 	# update parameters for justCopyDisks
 	if ($justCopyDisks.count -ne 0) {
 		write-stepStart "Updating disk SKU and Zone for 'justCopyDisks'"
-		if ($null -eq $defaultDiskZone) {
-			write-logFileWarning "To create zonal disks, you must set parameter 'defaultDiskZone'"
-			write-logFile
-		}
 
 		update-paramSetDiskSku
 		update-diskZone
@@ -21563,6 +21842,7 @@ function step-armTemplate {
 			}}, `
 			Name
 		| Format-Table
+		| Out-String -Width $screenWidthSmall
 		| write-logFilePipe
 	}
 
@@ -21673,6 +21953,7 @@ function get-requiredStorageAccounts {
 		| Select-Object storageAccount, location, usage, controlPlane, dataPlane
 		| Sort-Object usage, location
 		| Format-Table
+		| Out-String -Width $screenWidthLarge
 		| write-logFilePipe
 	}
 }
@@ -22321,6 +22602,8 @@ function step-copySaContent {
 	}
 
 	write-stepStart "START COPY JOBS FOR SHARES" -startMeasurement
+	get-controlPlaneStats
+	$script:controlPlaneStatsStart = $script:controlPlaneStats.clone()
 
 	write-taskStart "grant network access to storage accounts for sa-copy"
 	grant-saAccess4controlPlane 'saCopy'
@@ -22645,6 +22928,7 @@ function show-vmExtensions {
 	$res 
 	| Select-Object VM, Name, Vers, Config, Status  
 	| Format-Table
+	| Out-String -Width $screenWidthLarge
 	| write-logFilePipe
 }
 
@@ -22699,14 +22983,12 @@ function new-vmExtension {
 	$res = @{
 		type 		= 'Microsoft.Compute/virtualMachines/extensions'
 		apiVersion	= '2025-04-01'
+		parent 		= "<$(get-bicepNameByType 'Microsoft.Compute/virtualMachines' $vmName)>"
 		name 		= $agentName
 		location	= $targetLocation
 		properties	= $properties
 		dependsOn	= @()
 	}
-
-	# add parent
-	$res.parent = "<$(get-bicepNameByType 'Microsoft.Compute/virtualMachines' $vmName)>"
 
 	# add dependency on other extensions 
 	# This makes sure that only one extension is installed at the same time
@@ -23534,6 +23816,7 @@ function step-snapshotsShares {
 	$script:saSnapshots
 	| Select-Object StorageAccount, Share, TimeStamp
 	| Format-Table
+	| Out-String -Width $screenWidthSmall
 	| write-logFilePipe
 }
 
@@ -24428,6 +24711,13 @@ try {
 			$script:setPrivateIpAlloc = @()
 		}
 	}
+
+	# update parameter maxDOP=0
+	if (!$copyMode -and ($maxDOP -eq 0)) {
+		$script:maxDOP = 16
+		write-logFileWarning "Parameter maxDOP=0 is only allowed in copy mode" `
+								"Keep default value maxDOP=16"
+	}
 	
 	#--------------------------------------------------------------
 	# check files
@@ -24966,7 +25256,7 @@ try {
 		}
 		else {
 			write-stepStart "Stopping VMs"
-			stop-parallelVMs $sourceRG $patchVMs
+			stop-parallelVMs $sourceRG $patchVMs -skipMeasurement
 		}
 
 		# display failed OS patches
@@ -25167,8 +25457,8 @@ try {
 		write-stepEnd -endMeasurement
 	}
 
-	# STEP ARM TEMPLATE
-	step-armTemplate
+	# STEP BICEP TEMPLATE
+	step-bicepTemplate
 
 	set-context $targetSub # *** CHANGE SUBSCRIPTION **************	
 	new-resourceGroup

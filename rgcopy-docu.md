@@ -167,7 +167,7 @@ You can further change the behavior by setting the following parameters:
 **`useIncSnapshots`** |**[switch]**: Always use incremental snapshots rather than full snapshots
 **`createDisksManually`** |**[switch]**: Do not use an BICEP-template for creating disks (use `New-AzDisk` or a REST-API call instead)
 **`skipDiskCreation`** |**[switch]**: Expect that all needed disks already exist in target RG
-**`justCopyDisks`** |**[array]** or **[boolean]** : Only copy the given disks to target RG. Do not deploy anything else in target RG. If the list contains detached disks then you must set parameter `defaultDiskZone`, too. When setting `justCopyDisks` to `$true` then all disks of the resource group are copied.
+**`justCopyDisks`** |**[array]** or **[boolean]** : Only copy the given disks to target RG. Do not deploy anything else in target RG. If the list contains detached disks then you must set parameter `defaultDiskZone`, too. This parameter applies then to all disks, not only the detached ones. When setting `justCopyDisks` to `$true` then all disks of the resource group are copied.
 **`useRestAPI`** |**[switch]**: Always Use REST-API calls instead of using `Grant-AzSnapshotAccess`, `New-AzDisk` and `New-AzSnapshot` (for snapshot copy)
 
  > :memo: **Note:** `UltraSSD_LRS` and `PremiumV2_LRS` disks can use a logical sector size of either 512 byte or 4 KB. A disk that is using  a **locical sector size of 512 byte** can be converted to any SKU. However, a disk with a locical sector size of 4 KB can only be copied to `UltraSSD_LRS` or `PremiumV2_LRS`
@@ -236,12 +236,6 @@ Connect-AzAccount `
 The cmdlet opens the default browser and you can enter account name and password.
 
 RGCOPY can use two different Azure accounts for connecting to the source RG and the target RG. In this case, you must run `Connect-AzAccount` for both accounts before starting RGCOPY. Furthermore, you must provide the RGCOPY connection parameters as described below. Hereby, RGCOPY knows which account has to be used for which resource group.
-
-PowerShell caches the Azure context. However, the lifetime of the cache might be limited. Once the cache is expired, you must run `Connect-AzAccount` again.
-
-!["RGCOPY failure"](/images/failedAzAccount.png)
-
->:bulb: **Tip:** You should run `Connect-AzAccount` immediately before starting a copy to a different region (which might take several hours) because the cached credentials might expire during the runtime of RGCOPY.<BR>Once this happens, yo do not need to start RGCOPY from scratch. There is an RGCOPY parameter that allows resuming in this particular case. See [Parameters for Remote Copy](./rgcopy-docu.md#Parameters-for-Remote-Copy)
 
 You can also use an Azure Managed System Identity (MSI) for running RGCOPY. Therefore, you have to create a VM (or container) with an MSI. Once you have assigned the required roles to the MSI and installed PowerShell and the Az module in the VM, you can run RGCOPY inside the VM. In this case, you must run the following command:
 
@@ -375,7 +369,7 @@ RGCOPY can change Availability Zones, Availability Sets and Proximity Placement 
 
 parameter|[DataType]: usage
 :---|:---
-**`setVmZone`** = <BR>`@("zone @ vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 0, 1, 2, 3, false} </li><li>**vm**: VM name </li></ul>The default value is '0' which removes the zone configuration.<BR>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone configuration. When setting to 'false', the existing zone is not changed.<BR>:bulb: **Tip:** Disks are always created in the same zone as their VMs. Detached disks are only copied when parameter `copyDetachedDisks` was set. In this case, the detached disks are created in the zone that is defined by parameter **`defaultDiskZone`** (with default value 0).
+**`setVmZone`** = <BR>`@("zone @ vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 0, 1, 2, 3, false} </li><li>**vm**: VM name </li></ul>The default value is '0' which removes the zone configuration.<BR>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone configuration. When setting to 'false', the existing zone is not changed.<BR>:bulb: **Tip:** Disks are always created in the same zone as their VMs. Detached disks are only copied when parameter `copyDetachedDisks` was set. In this case, the detached disks are created in the zone that is defined by parameter **`defaultDiskZone`**.
 **`setVmFaultDomain`** = <BR>`@("fault @ vm1,vm2,...", ...)`			|Set VM Fault Domain: <ul><li>**fault**: Used Fault Domain in {none, 0, 1, 2} </li><li>**vm**: VM name </li></ul>:bulb: **Tip:**  The value 'none' removes the Fault Domain configuration from the VM.<BR>:warning: **Warning:** Values {0, 1, 2} are only allowed if the VM is part of a VMSS Flex.
 **`skipVmssFlex`**|**[switch]**: do not copy existing VM Scale Sets Flexible. <BR>Hereby, the target RG does not contain any VM Scale Set.
 **`skipAvailabilitySet`**|**[switch]**: do not copy existing Availability Sets. <BR>Hereby, the target RG does not contain any Availability Set.
@@ -951,13 +945,14 @@ Disk SKU|set to **Premium_LRS** by default<BR>(can be changed using `setDiskSku`
 
 ***
 ## Copy disks
-By using parameter **`justCopyDisks`**, you can copy all or specific disks from the source RG to the target RG. This includes detached disks. No other resources are deployed in the target RG.
+By using parameter **`justCopyDisks`**, you can copy all or specific disks from the source RG to the target RG. This includes detached disks. 
 
-When setting this parameter, disk snapshots are created in the source RG. If needed, snapshots are copied to the target RG an deleted afterwards.
+The zone property of the disks is also copied. If you want to deploy the disks in the target RG in a different zone then you must set parameter **`defaultDiskZone`**. This parameter is then applied to all disks. Setting it to `0` will remove zonal deployment.
 
-The zone property of the disks is also copied. If you want to deploy the disks in the target RG in a different zone then you must set parameter **`defaultDiskZone`**. This parameter is applied to all disks. Setting it to `0` will remove zonal deployment. However, disks of SKU `UltraSSD_LRS` or `PremiumV2_LRS` will always use zonal deployment.
+You can use parameters `useBlobCopy`, `useSnapshotCopy` and `usAzCopy` to configure the copy process. When copying to a differenet region, we recommend using parameter `usAzCopy`, see the following BLOG for details: https://techcommunity.microsoft.com/blog/sapapplications/accelerating-cross-region-azure-disk-copying/4539245
 
-Example 1: copy all disks
+
+Example 1: copy all disks with keeping their zone using AzCopy (if the source region is different from the target region)
 
 ```powershell
 $rgcopyParameter = @{
@@ -965,7 +960,9 @@ $rgcopyParameter = @{
     targetRG        = 'contoso_target_rg'
     targetLocation  = 'eastus'
 
-    justCopyDisks   = $True
+    justCopyDisks   = $true
+    # defaultDiskZone = $null
+    usAzCopy        = $true
 }
 .\rgcopy.ps1 @rgcopyParameter
 ```
@@ -984,21 +981,7 @@ $rgcopyParameter = @{
 .\rgcopy.ps1 @rgcopyParameter
 ```
 
-Example 3: copy all disks without zonal deployment
-
-```powershell
-$rgcopyParameter = @{
-    sourceRG        = 'contoso_source_rg'
-    targetRG        = 'contoso_target_rg'
-    targetLocation  = 'eastus'
-
-    justCopyDisks   = @('disk1', 'disk2')
-    defaultDiskZone = 0
-}
-.\rgcopy.ps1 @rgcopyParameter
-```
-
-When a disk with the same name already exists in the target RG then you can use parameter **`defaultDiskName`** to copy a *single* disk and rename it. For example:
+When a disk with the same name already exists in the target RG then you can use parameter **`defaultDiskName`** to copy a *single* disk and rename it. In the following example, the disk is not zonal deployed:
 
 ```powershell
 $rgcopyParameter = @{
@@ -1374,8 +1357,6 @@ tag-set.ps1 $resourceGroup vm2 'rgcopy.ScriptStartSap=/root/startSAP.sh@vm2'
 
 
 ### Analyzing Failed Deployments
-Azure is validating a BICEP template as the first step of an deployment. This validation might fail for various reasons. In this case, you can see the errors **in the output of RGCOPY** (on the host and in the RGCOPY log file). RGCOPY performs several checks (including quota of VM families) before starting the deployment. The screenshot below is from a deployment that explicitly turned off RGCOPY quota checks (using RGCOPY switch `skipVmChecks`)
+Azure is validating a BICEP template as the first step of an deployment. This validation might fail for various reasons. In this case, you can see the errors **in the output of RGCOPY** (on the host and in the RGCOPY log file). RGCOPY performs several checks (including quota of VM families) before starting the deployment.
 
 If the BICEP template validation succeeds but errors occur during deployment then you can check details of the deployment errors **in the Azure Portal**.
-
-!["failedDeploymentRGCOPY"](/images/failedDeployment.png)

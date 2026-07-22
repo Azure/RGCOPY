@@ -1,4 +1,12 @@
 ## Version history
+#### RGCOPY 0.9.75 July 2026
+type|change
+:---|:---
+feature|Get network I/O and CPU usage while running AzCopy. This now works with control plane running on Linux *and* Windows.
+feature|New parameter `copyVMsOnly`. Remove parameter ~~`skipLinuxCpuStats`~~
+feature|Support for SKU 'StandardV2' of Public IP Addresses.
+feature|Support for privateIPAddressPrefixLength
+
 #### RGCOPY 0.9.74 July 2026
 type|change
 :---|:---
