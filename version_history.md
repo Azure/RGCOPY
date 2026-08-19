@@ -1,4 +1,15 @@
 ## Version history
+#### RGCOPY 0.9.76 August 2026
+type|change
+:---|:---
+feature|(Limited) support for running on DevBox
+feature|New parameters `renameVnets`, `renameNICs`, `renameIPs`, `renameNSGs`, `renameAll`, `setAddressSpace`
+feature|Remove parameters ~~`jumpboxName`~~, ~~`removeFQDN`~~
+feature|Rename parameter ~~`copyVMsOnly`~~ to `skipOptionalNetworkResources` that skips the following resources: `networkSecurityGroups`, `ApplicationSecurityGroups`, `routeTables`, `bastionHosts`, `privateEndpoints`, `dnsZones`, `privateDnsZones`
+feature|Remove parameters  ~~`cloneVMs`~~, ~~`cloneNumber`~~. They are not needed for clone mode any more. Use parameter `setVmName` instead.
+feature|Display required routes when connected to VPN and creation of delegation token for BLOB copy fails.
+feature|Rename parameter ~~`deleteBackupsOnly`~~ to `justDeleteBackups`
+
 #### RGCOPY 0.9.75 July 2026
 type|change
 :---|:---
