@@ -1,8 +1,8 @@
 # RGCOPY documentation
 ***
-**Version: 0.9.76<BR>August 2026**
+**Version: 0.9.77<BR>SEptember 2026**
 ***
-RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group. The target RG might be in a different region or subscription. RGCOPY is running on **Windows** (not in a Terminal Services session) and **Linux** VMs.
+RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group. The target RG might be in a different region or subscription. RGCOPY is running on **Windows** and in a **Linux** VM.
 
 RGCOPY has been developed for copying and testing SAP systems in Azure. Therefore, it [supports](./rgcopy-docu.md#Supported-Azure-Resources) the most important Azure resources needed for SAP, for example **VMs**, **disks**, **load balancers**, storage accounts including the content of **containers**, **SMB** and **NFS shares**.
 
@@ -18,7 +18,7 @@ RGCOPY has different operation modes. By default, RGCOPY is running in Copy Mode
     - Adding, removing, and changing [availability](./rgcopy-docu.md#Parameters-for-Availability) configuration: **Proximity Placement Groups**, **Availability Sets**, **Availability Zones**, and **VM Scale Sets Flexible**.
     - Converting **disk SKUs** from and to `Premium_LRS`, `StandardSSD_LRS`, `Standard_LRS`, `Premium_ZRS`, `StandardSSD_ZRS`, `UltraSSD_LRS` and `PremiumV2_LRS`. Changing the logical sector size is not possible. Disks are copied using full or incremental snapshots, snapshot copy, blob copy or AzCopy. 
     - Renaming resources (VMs, disks, NICs, PIPs, VNETs, subnets) and **changing Address Space of VNETs** and subnets.
-    - Converting disks to [NetApp Volumes](./rgcopy-docu.md#NetApp-Volumes-and-Ultra-SSD-Disks) and vice versa using **file copy**
+    - Converting disks to NetApp Volumes and vice versa using [file copy](./rgcopy-docu.md#File-Copy-of-NetApp-Volumes).
 - In **[Clone Mode](./rgcopy-docu.md#Clone-Mode)**, a VM is cloned within the same resource group. This can be used for changing VM zone, availibility set, PPG or VMSS Flex without deleting the existing VM.
 - In **[Merge Mode](./rgcopy-docu.md#Merge-Mode)**, a VM is merged into a different resource group. This can be used for copying a jump box to a different resource group.
 
@@ -155,7 +155,7 @@ You can further change the behavior by setting the following parameters:
 **`useIncSnapshots`** |**[switch]**: Always use incremental snapshots rather than full snapshots
 **`createDisksManually`** |**[switch]**: Do not use an BICEP-template for creating disks (use `New-AzDisk` or a REST-API call instead)
 **`skipDiskCreation`** |**[switch]**: Expect that all needed disks already exist in target RG
-**`justCopyDisks`** |**[array]** or **[boolean]** : Only copy the given disks to target RG. Do not deploy anything else in target RG. If the list contains detached disks then you must set parameter `defaultDiskZone`, too. This parameter applies then to all disks, not only the detached ones. When setting `justCopyDisks` to `$true` then all disks of the resource group are copied.
+**`justCopyDisks`** |**[array]** or **[boolean]** : Only copy the given disks to target RG. Do not deploy anything else in target RG.<BR>If the list contains detached disks then you might set one of the parameters parameters: `defaultDiskZone`, `switchZone0`, `switchZone1`, `switchZone2`, `switchZone3`.<BR>These parameters apply then to all disks, not only the detached ones. Parameter `setVmZone` is not allowed together with `justCopyDisks`.<BR>When setting `justCopyDisks` to `$true` then all disks of the resource group are copied.
 **`useRestAPI`** |**[switch]**: *Always* Use REST-API calls instead of using `Grant-AzSnapshotAccess`, `New-AzDisk` and `New-AzSnapshot` (for snapshot copy)
 **`useInternetEndpoint`** |**[switch]**: Storage account for BLOB copy with additional internet endpoint.<BR>This is an experimental parameter for BLOB copy (with or without AzCopy). It might help when there are connection problems from the control plane to the storage account in the target RG. Do not use it as long as you do not see connection issues. The internet endpoint might slow down the blob copy process.
 
@@ -176,8 +176,6 @@ In this case, RGCOPY creates a temporary storage account for storing the disks c
 
 > :warning: **Warning:** The storage account for BLOB copy has **disabled storage account keys** if the target subscription is a Microsoft internal subscription or when RGCOPY parameter **`disableTargetSaKeys`** is set. In this case, the Azure user for the target subscription must have RBAC role **`Storage Blob Data Contributor`** 
 
-If the target subscription is a Microsoft internal subscription then a Network Security Perimeter NSP in **learning mode** is created in the target RG.
-
 !["different tenant"](/images/disks_different_tenant.png)
 
 #### Disk Creation Only
@@ -187,6 +185,44 @@ By setting parameter `justCopyDisks`, RGCOPY only creates the disks in the targe
 #### Disk Creation Skipping
 By setting parameter `skipDiskCreation`, RGCOPY expects that all needed disks already exist in the target RG. This is useful if you want to use a different tool for copying (or replicating) the disks to the target RG.
 !["skip disk creation"](/images/disks_skip_creation.png)
+
+### RGCOPY storage accounts
+RGCOPY needs access to files in shares and containers of storage accounts in the following scenarios:
+- **Blob-Copy:**
+RGCOPY copies disk snapshots from the source RG to BLOBs in the target RG if the target RG is in a different region or the target subscription is using a different tenant. Therefore, a storage account is created in the target RG with an automatically generated name. This storage account is automatically deleted after Blob-Copy.
+- **File-Copy:**
+RGCOPY can copy files from mount points in the source RG to mount points in the target RG (when VMs are running on Linux). This is used for copying NetApp volumes or for converting them do disks. The copy is not performed directly. Instead, a storage account with an NFS share is created in the source RG that contains the backups of all mount points. The name of this storage account is also automatically generated based on the resource group name. However, this storage account is not automatically deleted
+- **Share-Copy:**
+When copying the content of shares, RGCOPY needs access to the copied storage accounts in the target RG. These storage accounts must be configured using RGCOPY parameter **`renameSa`** (since the name of storage accounts must be unique in whole Azure, you must give them a new name using parameter `renameSa` when copying from source RG to target RG).
+
+All these storage accounts are created by RGCOPY. In Microsoft internal subscriptions, these storage accounts are additionally secured by disabling storage account keys and allowing network access only to selected networks.
+
+Furthermore, a network security perimeter (NSP) is created and associated with the storage accounts in *Learning Mode*. NSPs in *Enforced Mode* are not supported by RGCOPY yet.
+
+This is not the case for other subscriptions. However, you can configure these additional security settings for other subscriptions using the following RGCOPY parameter switches:
+
+parameter|[DataType]: usage
+:---|:---
+**`disableTargetSaKeys`**|**[switch]:** Disable storage account keys for the storage account in the target RG (used for Blob-Copy).
+**`disableSourceSaKeys`**|**[switch]:** Disable storage account keys for the storage account in the source RG (used for File-Copy).
+**`disableShareSaKeys`**|**[switch]:** Disable storage account keys for the storage accounts copied to the target RG (used for Share-Copy).
+**`disableTargetSaAllNwAccess`**|**[switch]:** Restrict public network access to selected networks for the storage account in the target RG (used for Blob-Copy)
+**`disableSourceSaAllNwAccess`**|**[switch]:** Restrict public network access to selected networks for the storage account in the source RG (used for File-Copy)
+**`disableShareSaAllNwAccess`**|**[switch]:** Restrict public network access to selected networks for copied storage accounts to the target RG (used at Share-Copy)
+**`useNSP`**|**[switch]:** Associate the storage accounts with a network security perimeter (NSP)
+
+
+### RGCOPY snapshots
+RGCOPY might use snapshots in the following scenarios:
+- **Disk-Creation:**
+RGCOPY automatically creates snapshots from all copied disks in the source RG. The name of these snapshots always ends with `.rgcopy`. Disk snapshots can either be full snapshots or incremental snapshots.
+- **File-Copy:**
+The source of a file copy can either be a NetApp volume or a disk. For file copy from disks, you cannot use a snapshot. For file copy from NetApp volumes, a snapshot with name `rgcopy` is automatically used if it exists. When the snapshot with name `rgcopy` is not found then files are directly copied form the volume.
+RGCOPY does not know which volume is mounted on which VM. The volume might even be located in a different resource group. Therefore, you must use RGCOPY parameter **`snapshotVolumes`** if you want to create a volume snapshot before starting file copy. 
+- **Share-Copy:**
+RGCOPY creates and uses share snapshots of NFS and SMB shares automatically if parameter **`useShareSnapshots`** is set. These snapshots have the metadata comment `rgcopy`. RGCOPY does not use snapshots when copying containers.
+
+You can only create one RGCOPY snapshot for each disk/volume/share. if you create a new RGCOPY snapshot then the old snapshot is deleted. You can skip snapshot creation (and use an older, existing snapshot) by setting RGCOPY parameter **`skipSnapshots`**. You can skip the snapshots of a prticular type by using parameters **`skipSnapshotsDisks`**, **`skipSnapshotsShares`** or **`skipSnapshotsShares`**.
 
 
 ***
@@ -365,7 +401,9 @@ RGCOPY can change Availability Zones, Availability Sets and Proximity Placement 
 
 parameter|[DataType]: usage
 :---|:---
-**`setVmZone`** = <BR>`@("zone @ vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 0, 1, 2, 3, false} </li><li>**vm**: VM name </li></ul>The default value is '0' which removes the zone configuration.<BR>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone configuration. When setting to 'false', the existing zone is not changed.<BR>:bulb: **Tip:** Disks are always created in the same zone as their VMs. Detached disks are only copied when parameter `copyDetachedDisks` was set. In this case, the detached disks are created in the zone that is defined by parameter **`defaultDiskZone`**.
+**`setVmZone`** = <BR>`@("zone @ vm1,vm2,...", ...)`			|Set VM Availability Zone: <ul><li>**zone** in {none, 0, 1, 2, 3, false} </li><li>**vm**: VM name </li></ul>The default value is '0' which removes the zone configuration.<BR>:bulb: **Tip:**  Rather than 'none', you can use '0' for removing zone configuration. When setting to 'false', the existing zone is not changed.<BR>:bulb: **Tip:** Disks are always created in the same zone as their VMs. Detached disks are only copied when parameter `copyDetachedDisks` was set.
+**`defaultDiskZone`** = `zone`|**zone** in {0, 1, 2, 3}<BR>When set then all detached disks are moved to the specified zone.
+**`switchZone0`** = `zone`<BR>**`switchZone1`** = `zone`<BR>**`switchZone2`** = `zone`<BR>**`switchZone3`** = `zone`<BR>|**zone** in {0, 1, 2, 3}<BR>If one of these parameters is set then all VMs and disks of a given zone are moved to the configured zone.<BR>Parameters `defaultDiskZone` and `setVmZone` are ignored in this case. All other VMs and disks stay in their original zone.<BR>For example, by setting `switchZone0=1` and `switchZone1=2`, all non-zonal VMs and disks are moved to zone 1 and all VMs and disks that were originally in zone 1 are moved to zone 2. VMs and disks in zone 2 and 3 stay in their zones.
 **`setVmFaultDomain`** = <BR>`@("fault @ vm1,vm2,...", ...)`			|Set VM Fault Domain: <ul><li>**fault**: Used Fault Domain in {none, 0, 1, 2} </li><li>**vm**: VM name </li></ul>:bulb: **Tip:**  The value 'none' removes the Fault Domain configuration from the VM.<BR>:warning: **Warning:** Values {0, 1, 2} are only allowed if the VM is part of a VMSS Flex.
 **`skipVmssFlex`**|**[switch]**: do not copy existing VM Scale Sets Flexible. <BR>Hereby, the target RG does not contain any VM Scale Set.
 **`skipAvailabilitySet`**|**[switch]**: do not copy existing Availability Sets. <BR>Hereby, the target RG does not contain any Availability Set.
@@ -547,12 +585,19 @@ This will copy the storage accounts `saName1` and `saName2` from the source RG t
 
 > :memo: **Note:** RGCOPY does not copy private endpoints. Granting network access for the storage accounts from the VMs has to be done manually in the target RG.
 
-### Copy storage account content
+### Copy storage account content (share-copy)
 You can copy all BLOBs in **containers** as well as all files in **SMB** and **NFS** file shares by setting parameter **`copySaShares`**. This uses the tool **azcopy** which is called by RGCOPY.
 
-> :memo: **Note:** For Storage account copy, it is required running RGCOPY inside an Azure VM with **user assigned managed identity**. In this case, a subnet rule is created from the VM's subnet to the storage accounts. RGCOPY tries ro figure out the subnet on its own. To be on the save side, you can use RGCOPY parameter **`subnetIdControlPlane`** for setting the subnet ID. In this subnet, the service endpoint **`Microsoft.Storage.Global`** must be enabled.
+**For share-copy, special restrictions exist:** AzCopy must either authenticate using storage account keys or by using the managed identity of a VM that is running RGCOPY.
+- Everything works fine fine if the source SA and the target SA are both configured to allow SA keys.
+- When one of them does not allow using SA keys then you must run RGCOPY inside an Azure VM with a managed identity.
+- When both do not allow storage account keys then you must use the same Azure user (the managed identity) for the source SA and target SA. In this case, cross-tenant copy is not possible.
 
-You can even copy BLOBs and files between different tenants. For this, you need two Azure users (one per tenant) having the **Required RBAC roles** (see below).
+#### Share-copy using an Azure VM
+When using an Azure VM for starting RGCOPY then you should assign a **user assigned managed identity** to this VM. In this case, RGCOPY creates a subnet rule for each needed storage account using the subnet of the VM. RGCOPY tries ro figure out the ID of the subnet on its own. To be on the save side, you can use RGCOPY parameter **`subnetIdControlPlane`** for setting the subnet ID. In this subnet, the service endpoint **`Microsoft.Storage.Global`** must be enabled.
+
+#### Cross-tenant share-copy 
+You can even copy containers, NFS-shares and SMB-shares between different tenants. For this, you need two Azure users (one per tenant) having the **Required RBAC roles** (see below).
 
 > :memo: **Note:** Copying files of NFS or SMB shares between **between different tenants** is only possible if either the source SA or the target SA is configured allowing SA keys.
 
@@ -562,28 +607,15 @@ In this scenario, let's call the tenant that contains the storage account with a
 - Run **`connect-AzAccount -DeviceAuth -AuthScope Storage -SubscriptionName '<name>'`** for *tenantKey*.
 - Start RGCOPY in the control plane VM.
 
-#### Network access to storage accounts in source RG
-The storage accounts might or might not be associated to a network security perimeter (**NSP**) in *Learning Mode*. **NSPs in *Enforced Mode* are not supported by RGCOPY yet.**
 
-> :memo: **Note:** If you want to copy the storage account content then you must **enable Public Network Access (for selected networks)** in the source SA before starting RGCOPY.
+#### Required Network access in source RG
+The storage accounts in the source RG might or might not be associated with a network security perimeter (**NSP**) in *Learning Mode*. **NSPs in *Enforced Mode* are not supported by RGCOPY yet.**
+
+> :memo: **Note:** If you want to copy shares of a storage account then you must **enable Public Network Access (for selected networks)** in the source SA before starting RGCOPY.
 This can be configured independently from an associated NSP.
 
-RGCOPY changes the following storage account configurations in the source RG:
-
-- RGCOPY creates a **subnet rule** for all storage accounts in the source RG to allow network access for the control plane VM (VM that runs RGCOPY).
-- When running on a PC, RGCOPY creates either a **storage account IP rule** or an **NSP IP rule** for the IP address of the PC.
-
-#### Network access to storage accounts in target RG
-RGCOPY changes the following storage account configurations in the target RG:
-- **`allowSharedKeyAccess`**
-This will be set to *False* for Microsoft internal subscriptions. For other subscriptions, it will be set to *True* (as long as RGCOPY parameter `disableTargetSaKeys` is not set).
-- **`publicNetworkAccess`**
-This configuration will only be changed if it was `SecuredByPerimeter` in the source SA. In this case, you will get a warning in RGCOPY and the target SA will be created with `publicNetworkAccess = Disabled`.
-- **`networkAcls.defaultAction`**
-This will always be set to *Deny* in the target RG.
-- RGCOPY creates a **subnet rule** for all storage accounts in the target RG to allow network access for the control plane VM (VM that runs RGCOPY).
-- When running on a PC, RGCOPY creates either a **storage account IP rule** or an **NSP IP rule** for the IP address of the PC.
-- If the target RG is in a Microsoft internal subscription then RGCOPY automatically creates an **NSP** in the target RG and associates all copied storage accounts to this NSP in *learning mode*.
+#### Network access to storage accounts (in source RG or target RG)
+When running inside a VM then RGCOPY creates a subnet rule to allow network access to the storage accounts. Otherwise, RGCOPY creates IP rules in the firewall of either the storage account or an associated Network security perimeter.
 
 #### Required RBAC roles
 The users that are used for accessing the source subscription and target subscription must have the following RBAC roles (in addition to **`Contributor`**):
@@ -602,31 +634,23 @@ RGCOPY calls azcopy and defines the authentication type for the source and targe
 If the storage account is configured to allow storage account keys then RGCOPY creates an SAS token using storage account key 1 (see parameter `copySaKeyName` below)
 2. **User delegation token**
 For BLOB containers, RGCOPY tries to create a user delegation SAS token. This is only possible if the RBAC roles mentioned above are set.
-3. **OAuth authentication**
-If an SAS token cannot be created then OAuth authentication is used. When running RGCOPY in an Azure VM, the same manged identity is taken that was used for running **`connect-AzAccount -Identity -AccountId <id> -AuthScope Storage -SubscriptionName '<name>'`**
+3. **MSI authentication**
+If an SAS token cannot be created then Managed Identity authentication is used. In this case, you must run RGCOPY in an Azure VM and connect to Azure using the manged identity:
+**`connect-AzAccount -Identity -AccountId <id> -AuthScope Storage -SubscriptionName '<name>'`**
 
 #### Using snapshots
-You can directly copy from a file share or copy from a file share snapshot that has been created by RGCOPY when using parameter switch **`copySaUsingSnapshots`**. 
+You can directly copy from a file share or copy from a file share snapshot that has been created by RGCOPY when using parameter switch **`useShareSnapshots`**. 
 
 > :warning: **Warning:** SMB permissions are **not** copied when using a snapshot.
 NFS permissions **are** copied, whether a snapshot is used or not.
 
 > :memo: **Note:** Using BLOB snapshots is not possible with RGCOPY.
 
-
-Azure file share snapshots (SMB and NFS) do not have a name. They only have a creation date. There can only be one RGCOPY file share snapshot per share. RGCOPY stores the names of its snapshot as Azure tags in the storage account. This is needed to distinguish between RGCOPY snapshots and other (manual) snapshots of a file share.
-
-The storage account might have the following Azure tags:
-- `rgcopySnapshot_nfs = 2025-10-08T12:28:33Z`
-- `rgcopySnapshot_smb = 2025-10-08T12:28:37Z`
-
-This means that the file share with name `nfs` has a snapshot created by RGCOPY with the name `2025-10-08T12:28:33Z`. Another snapshot exists for a file share with the name `smb`.
-
-Before RGCOPY creates a new snapshot, it delets its previous snapshot and the corresponding Azure tag. Once the new RGCOPY snapshot is created, its name is stored as an Azure tag in the storage account resource.
+Azure file share snapshots (SMB and NFS) do not have a name. They only have a creation date and metadata. RGCOPY uses the metadata `Comment=rgcopy` for its snapshots. There can only be one RGCOPY snapshot per share. Before RGCOPY creates a new share snapshot, it deletes its previous RGCOPY snapshot. 
 
 You might manually delete an RGCOPY file share snapshot using Azure portal. However, there is no feature implemented in RGCOPY to delete an old RGCOPY file share snapshot (rather than creating a new one).
 
-RGCOPY file share snapshots are only created when using parameter `copySaUsingSnapshots` and not setting parameter `skipSnapshots`. The latter parameter skips creating file share snapshots as well as disk snapshots.
+RGCOPY file share snapshots are only created when using parameter `useShareSnapshots` and not setting parameter `skipSnapshots`. The latter parameter skips creating file share snapshots as well as disk snapshots and volume snapshots.
 
 #### Repeating failed content copies
 RGCOPY uses the tool `azcopy` to copy the content of storage accounts. This might fail for any reason. In this case, you can simply repeat RGCOPY by adding the parameter switch **`justCopySaShares`** (and adjusting parameter `copySaShares`). This will skip creating snapshots and deploying the BICEP template (However, a new BICEP template will be created).
@@ -640,7 +664,7 @@ parameter|usage
 **`copySaShares`**|**[boolean]** or **[array]**: Copies storage account content (BLOBs and files) after deploying target RG. When set to `true`, all containers and shares are copied. When passing an array of names, all containers and shares include in this array are copied.
 **`subnetIdControlPlane`**|**[string]**:Subnet ID of control plane (VM that runs RGCOPY), for example: <BR>`/subscriptions/5b0f1c1f-e257-4872-a1e3-bf4ad6f452e7/resourceGroups/control_plane/providers/Microsoft.Network/virtualNetworks/vnet-name/subnets/default`<BR>This subnet will be granted to all copied storage accounts. RGCOPY tries to figure out the subnet ID on its own. If this does not work then you have to set parameter `subnetIdControlPlane` manually.
 **`justCopySaShares`**|**[switch]** Just copy the BLOBs and files defined by parameter `copySaShares`. <BR>Do not create snapshots and do not deploy anything.
-**`copySaUsingSnapshots`**|**[switch]**: Create file share snapshots and use them as the source when copying file shares.<BR>:warning: **Warning:** SMB permissions are not copied when using a snapshot.
+**`useShareSnapshots`**|**[switch]**: Create file share snapshots and use them as the source when copying file shares.<BR>:warning: **Warning:** SMB permissions are not copied when using a snapshot.
 **`copySaKeyName`**|**[string]**: If storage account key should be used for azcopy then you can define here which key.<BR>**allowed:** `key1`, `key2`<BR>**default:** `key1`
 **`copySaRevokeCpAccess`**|**[switch]**: Revoke access from control plane VM after content has been copied.
 **`azCopyRepeatCount`**|**[int]**:Number of automatic retries of AzCopy, default value: `1`
@@ -950,7 +974,9 @@ Disk SKU|set to **Premium_LRS** by default<BR>(can be changed using `setDiskSku`
 ## Just copy disks
 By using parameter **`justCopyDisks`**, you can copy all or specific disks from the source RG to the target RG. This includes detached disks. 
 
-The zone property of the disks is also copied. If you want to deploy the disks in the target RG in a different zone then you must set parameter **`defaultDiskZone`**. This parameter is then applied to all disks. Setting it to `0` will remove zonal deployment.
+The zone property of the disks is also copied. If you want to deploy the disks in the target RG in a different zone then you must set parameter **`defaultDiskZone`**. This parameter is then applied to all disks. Setting it to `0` will remove zonal deployment. 
+
+Alternatively, you can set one of the following parameters: **`switchZone0`**, **`switchZone1`**, **`switchZone2`**, **`switchZone3`**. If one of these parameters is set then all disks of a given zone are moved to the configured zone. Parameter `defaultDiskZone` is ignored in this case. All other disks stay in their original zone. For example, by setting `switchZone0=1` and `switchZone1=2`, all non-zonal disks are moved to zone 1 and all disks that were originally in zone 1 are moved to zone 2. Disks in zone 2 and 3 stay in their zones.
 
 You can use parameters `useBlobCopy`, `useSnapshotCopy` and `useAzCopy` to configure the copy process. When copying to a differenet region, we recommend using parameter `useAzCopy`, see the following BLOG for details: https://techcommunity.microsoft.com/blog/sapapplications/accelerating-cross-region-azure-disk-copying/4539245
 
@@ -964,7 +990,6 @@ $rgcopyParameter = @{
     targetLocation  = 'eastus'
 
     justCopyDisks   = $true
-    # defaultDiskZone = $null
     useAzCopy        = $true
 }
 .\rgcopy.ps1 @rgcopyParameter

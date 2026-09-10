@@ -1,4 +1,15 @@
 ## Version history
+#### RGCOPY 0.9.77 September 2026
+type|change
+:---|:---
+feature|New parameters `switchZone0`, `switchZone1`, `switchZone2`, `switchZone3`.<BR>For example, `$switchZone1 = 2` changes VMs and disks in zone 1 to zone 2
+feature|Make parameter `useAzCopy` default on DevBox and Azure VMs.
+feature|Improve output of simulation runs (parameter `simulate`)
+feature|Use Azure metadata rather than tags to detect share snapshots that were created by RGCOPY. You can see them now in Azure Portal. The comment of these snapshots is `rgcopy`.
+feature|Rename parameter ~~`copySaUsingSnapshots`~~ to `useShareSnapshots`
+feature|New parameters `skipSnapshotsDisks`, `skipSnapshotsShares`, `skipSnapshotsVolumes`.
+feature|New parameters `disableTargetSaKeys`, `disableSourceSaKeys`, `disableShareSaKeys`, `disableTargetSaAllNwAccess`, `disableSourceSaAllNwAccess`, `disableShareSaAllNwAccess`. Remove parameter `useAzureCLI`.
+
 #### RGCOPY 0.9.76 August 2026
 type|change
 :---|:---

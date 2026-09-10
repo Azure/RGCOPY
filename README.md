@@ -1,6 +1,6 @@
 # RGCOPY
 
-RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group. The target RG might be in a different region or subscription. RGCOPY is running on **Windows** (not in a Terminal Services session) and **Linux** VMs.
+RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies resources of an Azure resource group (**source RG**) to a new resource group (**target RG**). It can copy a whole landscape consisting of many servers within a single Azure resource group. The target RG might be in a different region or subscription. RGCOPY is running on **Windows** and in a **Linux** VM.
 
 RGCOPY has been developed for copying and testing SAP systems in Azure. Therefore, it [supports](./rgcopy-docu.md#Supported-Azure-Resources) the most important Azure resources needed for SAP, for example **VMs**, **disks**, **load balancers**, storage accounts including the content of **containers**, **SMB** and **NFS shares**.
 
