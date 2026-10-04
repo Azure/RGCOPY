@@ -1,7 +1,7 @@
 <#
 rgcopy.ps1:       Copy Azure Resource Group
-version:          0.9.77
-version date:     September 2026
+version:          0.9.78
+version date:     October 2026
 Author:           Martin Merdes
 Public Github:    https://github.com/Azure/RGCOPY
 
@@ -108,6 +108,19 @@ param (
 	,[string] $blobsSA						# Storage Account of BLOBs.
 	,[string] $blobsRG						# Resource Group of BLOBs
 	,[string] $blobsSaContainer				# Container of BLOBs
+
+	# access to disk content
+	,[switch] $allowPublicNwAccessForSnapshots
+	,[switch] $useSnapshotCopy4ProtectedSnapshots
+
+	,[ValidateSet('Disabled', 'Enabled')]
+	 [string] $diskPublicNetworkAccess
+
+	,[ValidateSet('DenyAll', 'AllowAll')]
+	 [string] $diskNetworkAccessPolicy	# 'AllowPrivate' not supported by RGCOPY
+
+	,[ValidateSet('AzureActiveDirectory', 'None')]
+	 [string] $diskDataAccessAuthMode
 
 	#--------------------------------------------------------------
 	# parameters for cleaning an incomplete RGCOPY run
@@ -226,7 +239,7 @@ param (
 	#--------------------------------------------------------------
 	# default values
 	#--------------------------------------------------------------	
-	,[int] $grantTokenTimeSec		= 3 * 24 * 60 * 60		# grant access to source disks for 3 days
+	,[int] $grantTokenTimeSec		= 2 * 24 * 60 * 60		# grant access to source disks for 2 days
 	,[int] $vmStartWaitSec			= 5 * 60				# wait time after VM start before using the VMs (before trying to run any script)
 	,[int] $preSnapshotWaitSec		= 5 * 60				# wait time after running pre-snapshot script
 	,[int] $vmAgentWaitMinutes		= 30					# maximum wait time until VM Agent is ready
@@ -325,8 +338,14 @@ param (
 	# usage: $setDiskBursting = @("$bursting@$disk1,$disk1...", ...)
 	#  with $bursting -in ('True','False')
 
+	,$setDiskSupportsHibernation = @()
+	# usage: $setDiskSupportsHibernation = @("$hibernation@$disk1,$disk1...", ...)
+	#  with $hibernation -in ('True','False')
+
 	,$setDiskIOps = @()
 	,$setDiskMBps = @()
+	,$setDiskIOpsReadOnly = @()
+	,$setDiskMBpsReadOnly = @()
 
 	,$setDiskMaxShares= @()
 	# usage: $setDiskMaxShares = @("$maxShares@$disk1,$disk1...", ...)
@@ -343,7 +362,14 @@ param (
 
 	,$setDiskSku = 'Premium_LRS'				# default value in COPY MODE
 	# usage: $setDiskSku = @("$sku@$disk1,$disk1,...", ...)
-	#  with $sku -in ('Premium_LRS','StandardSSD_LRS','Standard_LRS','Premium_ZRS','StandardSSD_ZRS')
+	#  with $sku -in (	'false'
+	# 					'Premium_LRS'
+	# 					'StandardSSD_LRS'
+	# 					'Standard_LRS'
+	# 					'Premium_ZRS'
+	# 					'StandardSSD_ZRS'
+	# 					'PremiumV2_LRS'
+	# 					'UltraSSD_LRS')
 
 	# you might better use $switchZone<n> rather than $setVmZone and defaultDiskZone
 	,$setVmZone	= 0	# default value in COPY MODE
@@ -1903,7 +1929,8 @@ function write-logFileWarning {
 		$param4,
 		$stopCondition,
 		[switch] $stopWhenForceVmChecks,
-		[switch] $noSkip
+		[switch] $noSkip,
+		[switch] $red
 	)
 
 	# write error
@@ -1919,7 +1946,12 @@ function write-logFileWarning {
 	}
 	# write warning
 	else {
-		write-logFile "WARNING: $myWarning" -ForegroundColor 'yellow'
+		if ($red) {
+			write-logFile "WARNING: $myWarning" -ForegroundColor 'red'
+		}
+		else {
+			write-logFile "WARNING: $myWarning" -ForegroundColor 'yellow'
+		}
 	}
 
 	if ($param2.length -ne 0) { write-logFile $param2 }
@@ -4278,59 +4310,107 @@ function show-snapshots {
 		-ErrorAction 'SilentlyContinue' )
 	test-cmdlet 'Get-AzSnapshot'  "Could not get snapshots of resource group '$sourceRG'"
 
-	
-	if ($justCreateSnapshots) {
-		$requiredSnapshots = $script:copyDisks.Values.SnapshotName
+	# get required snapshots (including SnapshotSwap)
+	$requiredSnapshots = @()
+	$script:copyDisks.Values
+	| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) }
+	| ForEach-Object {
+		$requiredSnapshots += $_.SnapshotName
 	}
-	else {
-		$requiredSnapshots = @()
-		# get required snapshots
-		$script:copyDisks.Values
-		| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) }
-		| ForEach-Object {
-			$requiredSnapshots += $_.SnapshotName
+
+	$displaySnapshots = @()
+	# get properties
+	$script:sourceSnapshots
+	| Where-Object Name -in $requiredSnapshots
+	| ForEach-Object {
+
+		$PublicAccessDenied = $false
+		$AuthRequired 		= $false
+
+		if ($_.NetworkAccessPolicy -ne 'AllowAll') {
+			if ($null -ne $_.NetworkAccessPolicy) {
+				$PublicAccessDenied = $true
+			}
+		}
+		if ($_.PublicNetworkAccess -ne 'Enabled') {
+			if ($null -ne $_.PublicNetworkAccess) {
+				$PublicAccessDenied = $true
+			}
+		}
+		if ($_.DataAccessAuthMode -ne 'None') {
+			if ($null -ne $_.DataAccessAuthMode) {
+				$AuthRequired = $true
+			}
+		}
+
+		$displaySnapshots += @{
+			TimeCreated 		= $_.TimeCreated.ToLocalTime()
+			HyperVGeneration	= $_.HyperVGeneration
+			LogicalSectorSize	= $_.CreationData.LogicalSectorSize
+			Incremental			= $_.Incremental
+			DiskSizeGB			= $_.DiskSizeGB
+			AuthRequired		= $AuthRequired
+			PublicAccessDenied	= $PublicAccessDenied
+			Name				= $_.Name
 		}
 	}
 
 	# show all reqired snapshots
-	$script:sourceSnapshots
-	| Where-Object Name -in $requiredSnapshots
+	$displaySnapshots
 	| Sort-Object TimeCreated
 	| Select-Object `
-		@{label="TimeCreated"; expression={
-			'{0:yyyy-MM-dd HH:mm:ss \U\T\Cz}' -f ($_.TimeCreated).ToLocalTime()
-		}}, `
-		@{label="Gen"; expression={get-replacedOutput $_.HyperVGeneration $Null}}, `
-		@{label="SektorSize"; expression={get-replacedOutput $_.CreationData.LogicalSectorSize $Null}}, `
-		@{label="Incremental"; expression={get-replacedOutput $_.Incremental $False}}, `
-		@{label="SizeGB"; expression={$_.DiskSizeGB}}, `
+		@{label="TimeCreated";  expression={'{0:yyyy-MM-dd HH:mm:ss \U\T\Cz}' -f $_.TimeCreated}}, `
+		@{label="Gen";          expression={get-replacedOutput $_.HyperVGeneration $Null}}, `
+		@{label="SektorSize";   expression={get-replacedOutput $_.LogicalSectorSize $Null}}, `
+		@{label="Incr";  		expression={get-replacedOutput $_.Incremental $False}}, `
+		@{label="SizeGB";       expression={$_.DiskSizeGB}}, `
+		@{label="AuthReq";      expression={get-replacedOutput $_.AuthRequired $false}}, `
+		@{label="NoPublicAcc";  expression={get-replacedOutput $_.PublicAccessDenied  $false}}, `
 		Name
 	| Format-Table
-	| Out-String -Width $screenWidthSmall
+	| Out-String -Width $screenWidthLarge
 	| write-logFilePipe
 
-	if ($skipSnapshots -and ($pathArmTemplate -notin $boundParameterNames)) {
 
-		if ((!$skipDeployment) `
-		-or (!$skipRemoteCopy -and ($blobCopyNeeded -or $fileCopyNeeded ))) {
+	if ($pathArmTemplate -notin $boundParameterNames) {
 
-			# check for missing or wrong snapshots
-			$script:copyDisks.values
-			| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) }
-			| ForEach-Object {
-		
-				$snapshotName = $_.SnapshotName
-				$mySnapshot = $script:sourceSnapshots | Where-Object Name -eq $snapshotName
-				if ($Null -eq $mySnapshot) {
-					write-logFileError "Snapshot '$snapshotName' not found" `
-										-stopCondition $True # stop when not simulate
+		# check for missing or wrong snapshots (including SnapshotSwap)
+		$script:copyDisks.values
+		| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) }
+		| ForEach-Object {
+	
+			$snapshotName = $_.SnapshotName
+			$mySnapshot = $displaySnapshots | Where-Object Name -eq $snapshotName
+
+			# check if snapshot exists
+			if ($Null -eq $mySnapshot) {
+				write-logFileWarning "Snapshot '$snapshotName' not found" `
+									-stopCondition $True # stop when not simulate
+			}
+
+			# check if snapshot is incremental
+			elseif ($_.IncrementalSnapshots -and ($mySnapshot.Incremental -eq $False)) {
+				write-logFileWarning "Wrong property of snapshot '$snapshotName'" `
+									"Snapshot is not incremental" `
+									-stopCondition $True # stop when not simulate						
+			}
+			
+			# check if snapshot can be exported
+			elseif ($_.BlobCopy) {
+
+				if ($mySnapshot.PublicAccessDenied) {
+					write-logFileWarning "Wrong property of snapshot '$snapshotName'." `
+										"Snapshot does not allow public network access." `
+										"Set RGCOPY parameter 'allowPublicNwAccessForSnapshots' and re-create snapshots." `
+										-stopCondition $True # stop when not simulate	
 				}
-				elseif (($mySnapshot.Incremental -eq $False) `
-				-and ($_.IncrementalSnapshots -eq $True) `
-				-and ($skipSnapshots) ) {
-					write-logFileWarning "Wrong property of snapshot '$snapshotName'" `
-										"Property 'Incremental' is $($mySnapshot.Incremental), it should be: $($_.IncrementalSnapshots)" `
-										-stopCondition $True # stop when not simulate
+
+				if ($mySnapshot.AuthRequired) {
+					# RBAC role 'Data Operator for Managed Disks'
+					write-logFileWarning "Wrong property of snapshot '$snapshotName'." `
+										"Having an SAS token for reading the snapshot is not sufficient." `
+										"Set RGCOPY parameter 'allowPublicNwAccessForSnapshots' and re-create snapshots." `
+										-stopCondition $True # stop when not simulate	
 				}
 			}
 		}
@@ -4349,6 +4429,9 @@ function get-replacedOutput {
 	if ($value -eq $replace) {
 		return '-'
 	}
+	elseif ($null -eq $value) {
+		return '-'
+	}	
 	else {
 		return $value
 	}
@@ -4357,6 +4440,88 @@ function get-replacedOutput {
 #--------------------------------------------------------------
 function test-controlPlane {
 #--------------------------------------------------------------
+	write-stepStart "TEST RGCOPY ENVIRONMENT"
+	write-logFile
+
+	#--------------------------------------------------------------
+	# show warnings
+	if ($anyDiskEndpointRequired) {
+		write-logFileWarning "At least one disk has Network Access Policy 'AllowPrivate'" `
+							"This will be changed by RGCOPY to 'DenyAll'"
+		write-logFile
+	}
+
+	if ($allowPublicNwAccessForSnapshots) {
+		write-logFileWarning "You have set parameter 'allowPublicNwAccessForSnapshots'." `
+							"In this case, snapshots will be deleted during RGCOPY cleanup."
+	}
+
+	if ($anyDiskPublicAccessDenied) {
+		write-logFileWarning "At least one disk is additionally secured: It does not allow access from all networks"
+		write-logFile
+	}
+
+	if ($anyDiskAuthRequired) {
+		# RBAC role 'Data Operator for Managed Disks'
+		write-logFileWarning "At least one disk is additionally secured: SAS token for accessing it is not sufficient"
+		write-logFile
+	}
+
+
+	#--------------------------------------------------------------
+	# show errors: 
+	if ($script:cannotCopyDifferentTenant) {
+		write-logFileError "You must set set parameter 'allowPublicNwAccessForSnapshots'" `
+						"when copying additionally secured disks to another tenant (or user)"
+	}
+
+	if ($script:cannotCopyConfDisk) {
+		write-logFileError "You must set set parameter 'allowPublicNwAccessForSnapshots'" `
+						"when copying additionally secured disks of a confidential VM using BLOB copy"
+	}
+
+	if ($script:cannotCopySecuredDisk) {
+		write-logFileError "You must set either set parameter 'allowPublicNwAccessForSnapshots' or 'useSnapshotCopy4ProtectedSnapshots'" `
+							"when blob copy is needed for additionally secured disks. Set:" `
+							"- 'allowPublicNwAccessForSnapshots' to use BLOB copy" `
+							"- 'useSnapshotCopy4ProtectedSnapshots' to use SNAPSHOT copy instead"
+	}
+	
+	if ($script:cannotCopyLargeDisk) {
+		write-logFileWarning "Cannot use BLOB copy for disks larger than 4TiB -> SNAPSHOT copy"
+		write-logFileError "SNAPSHOT copy not possible with different tenant or user for target RG"
+	}
+
+	#--------------------------------------------------------------
+	# check storage account in target RG that stores the disk snapshots as BLOBs
+	if ($script:blobCopyNeeded) {
+		# default for non MS internal subscriptions:
+		# use storage account keys
+		if (!$disableTargetSaKeys) {
+			write-logFileWarning 'Using storage account keys for BLOB storage account in target RG' `
+								 "You can change this by setting RGCOPY switch 'disableTargetSaKeys'"
+		}
+
+		# default for MS internal subscriptions:
+		# use delegation token (requires RBAC roles and network access to SA)
+		else {
+			write-logFile 'Using user delegation token for BLOB storage account in target RG'
+			write-logFile 'This requires network access form control plane to the storage account'
+			write-logFile "and RBAC role 'Storage Blob Data Contributor'"
+			write-logFile
+
+			# check RBAC roles
+			if (('Storage Blob Data Contributor' -notin $targetSubRoles) `
+				-and ('Storage Blob Data Owner' -notin $targetSubRoles)) {
+
+				write-logFileWarning "RBAC role 'Storage Blob Data Contributor' not set for target subscription" `
+									"Copying disk snapshots will fail without this role"
+				
+			}
+		}
+	}
+
+	#--------------------------------------------------------------
 	if ($isDevBox) {
 		if ($msInternalVersion) {
 			show-devBoxInstructionsInternal
@@ -4459,15 +4624,15 @@ function show-sourceVMs {
 	$script:copyVMs.Values
 	| Sort-Object Name
 	| Select-Object `
-		@{label="VM name";     expression={$_.Name}}, `
-		@{label="Zone";        expression={get-replacedOutput $_.VmZone 0}}, `
-		@{label="VM size";     expression={$_.VmSize}}, `
-		@{label="DataDisks";   expression={$_.DataDisks.count}}, `
-		@{label="MountPoints"; expression={get-replacedOutput $_.MountPoints.count 0}}, `
-		@{label="NICs";        expression={$_.NicCount}}, `
-		@{label="Status";      expression={$_.VmStatus}}, `
+		@{label="VM name";      expression={$_.Name}}, `
+		@{label="Zone";         expression={get-replacedOutput $_.VmZone 0}}, `
+		@{label="VM size";      expression={$_.VmSize}}, `
+		@{label="DataDisks";    expression={$_.DataDisks.count}}, `
+		@{label="MountPoints";  expression={get-replacedOutput $_.MountPoints.count 0}}, `
+		@{label="NICs";         expression={$_.NicCount}}, `
+		@{label="Status";       expression={$_.VmStatus}}, `
 		@{label="SecurityType"; expression={get-replacedOutput $_.SecurityType ''}}, `
-		@{label="Encr@Host";   expression={get-replacedOutput $_.EncryptionAtHost $False}}
+		@{label="Encr@Host";    expression={get-replacedOutput $_.EncryptionAtHost $False}}
 	| Format-Table -Property *
 	| Out-String -Width $screenWidthLarge
 	| write-logFilePipe
@@ -4478,7 +4643,14 @@ function show-sourceVMs {
 	$script:copyDisks.Values
 	| Sort-Object Name
 	| Select-Object `
-		@{label="Disk Name"; expression={$_.Name}}, `
+		@{label="Disk Name"; expression={
+			if ($_.Name.Length -le 33) {
+				$_.Name
+			}
+			else {
+				"$($_.Name -replace "^(.{30}).*$", '$1')..."
+			}}	
+		}, `
 		@{label="Zone"; expression={get-replacedOutput $_.DiskZone 0}}, `
 		@{label="VM Name"; expression={
 			if ($_.ManagedBy.count -gt 1) {
@@ -4500,18 +4672,41 @@ function show-sourceVMs {
 			}
 		}}, `
 		SizeGB, `
+		@{label="Skip"; expression={get-replacedOutput $_.Skip $False}}, `
+		@{label="AuthReq";      expression={get-replacedOutput $_.AuthRequired $False}}, `
+		@{label="NoPublicAcc";  expression={get-replacedOutput $_.PublicAccessDenied $False}}
+	| Format-Table -Property *
+	| Out-String -Width $screenWidthLarge
+	| write-logFilePipe
+
+	#--------------------------------------------------------------
+	write-taskStart "disk performance in Source RG"
+	#--------------------------------------------------------------
+	$script:copyDisks.Values
+	| Sort-Object Name
+	| Select-Object `
+		@{label="Disk Name"; expression={
+			if ($_.Name.Length -le 33) {
+				$_.Name
+			}
+			else {
+				"$($_.Name -replace "^(.{30}).*$", '$1')..."
+			}}	
+		}, `
 		@{label="Size"; expression={$_.SizeTierName}}, `
 		@{label="Tier"; expression={get-replacedOutput $_.performanceTierName $_.SizeTierName}}, `
 		@{label="Burst"; expression={get-replacedOutput $_.BurstingEnabled $False}}, `
+		@{label="IOPSReadWrite"; expression={get-replacedOutput $_.DiskIOPSReadWrite 0}}, `
+		@{label="MBpsReadWrite"; expression={get-replacedOutput $_.DiskMBpsReadWrite 0}}, `
 		@{label="ZRS"; expression={
 			if ($_.SkuName -like '*ZRS') { 'ZRS' } 
 			else { '-' } }}, `
 		@{label="Shares"; expression={get-replacedOutput $_.MaxShares 1}}, `
-		@{label="Skip"; expression={get-replacedOutput $_.Skip $False}}, `
-		@{label="SecurityType"; expression={get-replacedOutput $_.SecurityType ''}}
+		@{label="IOPSReadOnly"; expression={get-replacedOutput $_.DiskIOPSReadOnly 0}}, `
+		@{label="MBpsReadOnly"; expression={get-replacedOutput $_.DiskMBpsReadOnly 0}}
 	| Format-Table -Property *
 	| Out-String -Width $screenWidthLarge
-	| write-logFilePipe
+	| write-logFilePipe	
 }
 
 #--------------------------------------------------------------
@@ -4532,7 +4727,7 @@ function show-diskCreationMethod {
 	| Sort-Object Name
 	| Select-Object `
 		@{label="Disk Name"; expression={$_.Name}}, `
-		@{label="Swap"; expression={$_.SwapName}}, `
+		@{label="Swap"; expression={get-replacedOutput $_.SwapName $null}}, `
 		@{label="Gen"; expression={get-replacedOutput $_.HyperVGeneration ''}}, `
 		@{label="NVMe"; expression={get-replacedOutput $_.DiskControllerType ''}}, `
 		@{label="Sektor"; expression={get-replacedOutput $_.LogicalSectorSize $Null}}, `
@@ -4541,37 +4736,6 @@ function show-diskCreationMethod {
 	| Format-Table -Property *
 	| Out-String -Width $screenWidthLarge
 	| write-logFilePipe
-	
-
-	# check storage account in target RG that stores the disk snapshots as BLOBs
-	if ($script:blobCopyNeeded) {
-		# default for non MS internal subscriptions:
-		# use storage account keys
-		if (!$disableTargetSaKeys) {
-			write-logFileWarning 'Using storage account keys for BLOB storage account in target RG' `
-								 "You can change this by setting RGCOPY switch 'disableTargetSaKeys'"
-		}
-
-		# default for MS internal subscriptions:
-		# use delegation token (requires RBAC roles and network access to SA)
-		else {
-			write-logFile 'Using user delegation token for BLOB storage account in target RG'
-			write-logFile 'This requires network access form control plane to the storage account'
-			write-logFile "and RBAC role 'Storage Blob Data Contributor'"
-			write-logFile
-
-			# check RBAC roles
-			if (('Storage Blob Data Contributor' -notin $targetSubRoles) `
-				-and ('Storage Blob Data Owner' -notin $targetSubRoles)) {
-
-				write-logFileWarning "RBAC role 'Storage Blob Data Contributor' not set for target subscription" `
-									"Copying disk snapshots will fail without this role"
-				
-			}
-
-
-		}
-	}
 }
 
 #--------------------------------------------------------------
@@ -4654,7 +4818,7 @@ function show-targetVMs {
 			}
 
 			if ($_.ManagedBy.count -gt 1) {
-				"{ $VM ...}"
+				"{ $VM +$($_.ManagedBy.count - 1)}"
 			}
 			else {
 				$VM
@@ -4750,7 +4914,11 @@ function update-disksFromVM {
 	| ForEach-Object {
 
 		if (($_.Skip -eq $True) -and ($_.ManagedBy.count -gt 1)) {
-			$_.Skip = $False
+
+			# for justCreateSnapshots: do not skip disks
+			if (!$justCreateSnapshots) {
+				$_.Skip = $False
+			}
 		}
 	}
 }
@@ -4766,6 +4934,7 @@ function set-restApiNeeded {
 
 		# TrustedLaunch not supported yet (as of June 2026) with Az cmdlets (New-AzSnapshotConfig)
 		if ($_.SecurityType -eq 'TrustedLaunch') {
+
 			if ($_.SnapshotCopy) {
 				$_.RestApiNeeded = $true	# copy-snapshots
 			}
@@ -4773,6 +4942,7 @@ function set-restApiNeeded {
 
 		# LogicalSectorSize not supported yet with Grant-AzSnapshotAccess
 		if ($_.LogicalSectorSize -eq 4096) {
+
 			if ($_.BlobCopy) {
 				$_.RestApiNeeded = $true	# grant-copySnapshots2Blobs
 			}
@@ -4780,8 +4950,9 @@ function set-restApiNeeded {
 
 		# TrustedLaunch/ConfidentialVM was not supported for New-AzDiskConfig
 		# (in the meanwhile, parameter SupportedSecurityOption has been added,
-		#  but is not working in all subscriptions/regoions)
+		#  but is not working in all subscriptions/regions)
 		if ($_.SecurityType.Length -ne 0) { 
+
 			if ($script:createDisksManually) {
 				$_.RestApiNeeded = $true	# new-disks
 			}
@@ -4790,6 +4961,7 @@ function set-restApiNeeded {
 		# NVMe not supported yet for New-AzDiskConfig
 		# Use REST API call instead
 		if ($_.DiskControllerType -eq 'NVME') {
+
 			if ($script:createDisksManually) {
 				$_.RestApiNeeded = $true	# new-disks
 			}
@@ -4800,16 +4972,9 @@ function set-restApiNeeded {
 #--------------------------------------------------------------
 function save-copyDisks {
 #--------------------------------------------------------------
-	if ($IsLinux -and $isAzure) {
-		if (!$useAzCopy) {
-			if ('useAzCopy' -notin $boundParameterNames) {
-				# $script:useAzCopy = $true
-				# write-logFileWarning "Using parameter 'useAzCopy' on Linux VM" `
-				# 					"You could change this by explicitly setting 'useAzCopy=`$false'"
-
-			}
-		}
-	}
+	$script:anyDiskEndpointRequired		= $false
+	$script:anyDiskPublicAccessDenied	= $false
+	$script:anyDiskAuthRequired			= $false
 
 	foreach ($disk in $script:sourceDisks) {
 
@@ -4850,98 +5015,47 @@ function save-copyDisks {
 		}
 
 		#--------------------------------------------------------------
-		# copy mode: default
-		if ($useBlobCopy) {
-			# blob copy explicitly requested
-			$blobCopy 				= $True
-			$snapshotCopy 			= $False
-		}
-		elseif ($useSnapshotCopy) {
-			# snapshot copy explicitly requested
-			$snapshotCopy 			= $True
-			$blobCopy 				= $False
-		}
-		elseif ($sourceLocation -ne $targetLocation) {
-			# snapshot copy is default for copying into different region
-			$snapshotCopy 			= $True
-			$blobCopy 				= $False
-		}
-		else {
-			# same region: no remote copy
-			$snapshotCopy 			= $False
-			$blobCopy 				= $False	
-		}
+		# network access of source disks
+		$NetworkAccessPolicy	= convertTo-String $disk.NetworkAccessPolicy
+		$PublicNetworkAccess	= convertTo-String $disk.publicNetworkAccess
+		$DataAccessAuthMode		= convertTo-String $disk.DataAccessAuthMode
 
-		#--------------------------------------------------------------
-		# copy mode: change default
-
-		# different user or tenant
-		if ($differentTenantOrUser) {
-			$blobCopy 				= $True
-			$snapshotCopy 			= $False
+		$AuthRequired			= $false
+		$PublicAccessDenied		= $false
+		if ($NetworkAccessPolicy -ne 'AllowAll') {
+			if ($null -ne $NetworkAccessPolicy) {
+				$PublicAccessDenied					= $true
+				$script:anyDiskPublicAccessDenied	= $true
+			}
 		}
-
-		# parameter useAzCopy overrides default for $blobCopy/$snapshotCopy
-		if ($blobCopy -or $snapshotCopy) {
-			if ($useAzCopy) {
-				$blobCopy 				= $True
-				$snapshotCopy 			= $False
+		if ($PublicNetworkAccess -ne 'Enabled') {
+			if ($null -ne $PublicNetworkAccess) {
+				$PublicAccessDenied					= $true
+				$script:anyDiskPublicAccessDenied	= $true
+			}
+		}
+		if ($DataAccessAuthMode -ne 'None') {
+			if ($null -ne $DataAccessAuthMode) {
+				$AuthRequired						= $true
+				$script:anyDiskAuthRequired			= $true
 			}
 		}
 
-		#--------------------------------------------------------------
-		# BLOB copy does not work for BLOBs larger than 4TiB using Start-AzStorageBlobCopy
-		if ($blobCopy -and ($disk.DiskSizeGB -gt 4096)) {
-			
-			write-logFileWarning "Cannot use BLOB copy for disks larger than 4TiB -> SNAPSHOT copy"
-			$blobCopy			= $False
-			$snapshotCopy 		= $True
-
-			if ($differentTenantOrUser) {
-				write-logFileError "Cannot use SNAPSHOT copy when using different tenants or users"
-			}
+		# set network access of target disks
+		if ($script:diskPublicNetworkAccess.length -ne 0) {
+			$PublicNetworkAccess = $script:diskPublicNetworkAccess
 		}
-
-		#--------------------------------------------------------------
-		# snapshot mode
-		if ($useIncSnapshots `
-		-or $snapshotCopy `
-		-or ($sku -in @('UltraSSD_LRS', 'PremiumV2_LRS'))) { `
-
-			$incrementalSnapshots	= $True
+		if ($script:diskDataAccessAuthMode.length -ne 0) {
+			$DataAccessAuthMode = $script:diskDataAccessAuthMode
 		}
-		else {
-			$incrementalSnapshots	= $False
+		if ($script:diskNetworkAccessPolicy.length -ne 0) {
+			$NetworkAccessPolicy = $script:diskNetworkAccessPolicy
 		}
-
-		#--------------------------------------------------------------
-		# confidential VM
-		# BadRequest ErrorMessage: Incremental snapshot support is not available for confidential vm.	
-		if ($securityType -like 'ConfidentialVM*' ) {
-			if ($incrementalSnapshots) {
-				$incrementalSnapshots	= $False
-			}
-
-			if ($snapshotCopy) {
-				write-logFileWarning "Cannot use incremental snapshots for confidential VMs -> BLOB copy"
-				$blobCopy 				= $true
-				$snapshotCopy 			= $false
-
-				if ($disk.DiskSizeGB -gt 4096) {
-					write-logFileError "Cannot use BLOB copy for disks larger than 4TiB"
-				}
-			}
-		}
-
-		# using createDisksManually
-		if ($securityType -like 'ConfidentialVM*' ) {
-			if ($blobCopy -or $snapshotCopy) {
-				if (!$createDisksManually) {
-					write-logFileWarning "Creating disks separately outside BICEP template for Confidential VMs"
-					write-logFile
-					$script:createDisksManually = $true
-				}
-			}
+		if ($NetworkAccessPolicy -eq 'AllowPrivate') {
+			# do not allow NetworkAccessPolicy 'AllowPrivate'
+			# This would require a private endpoint
+			$NetworkAccessPolicy = 'DenyAll'
+			$script:anyDiskEndpointRequired		= $true
 		}
 
 		#--------------------------------------------------------------
@@ -5024,20 +5138,16 @@ function save-copyDisks {
 			}
 		}
 
-		# OsType
-		if ($Null -eq $disk.OsType) {
-			$osType = $Null
-		}
-		else {
-			$osType = $disk.OsType -as [string]
-		}
-
 		# IO performance
 		$DiskIOPSReadWrite		= $disk.DiskIOPSReadWrite
 		$DiskMBpsReadWrite		= $disk.DiskMBpsReadWrite
+		$DiskIOPSReadOnly		= $disk.DiskIOPSReadOnly
+		$DiskMBpsReadOnly		= $disk.DiskMBpsReadOnly
 		if ($sku -notin @('UltraSSD_LRS', 'PremiumV2_LRS')) {
 			$DiskIOPSReadWrite	= 0
 			$DiskMBpsReadWrite	= 0
+			$DiskIOPSReadOnly	= 0
+			$DiskMBpsReadOnly	= 0
 		}
 
 		#--------------------------------------------------------------
@@ -5047,7 +5157,7 @@ function save-copyDisks {
 			Id          				= $disk.Id
 			Skip						= $false 					# will be updated below by VM info
 			Rename						= $null						# used for display in show-targetVMs
-			Location    				= $disk.Location -as [string]
+			Location    				= convertTo-String $disk.Location
 			Tags						= $disk.Tags
 			DiskZone					= $diskZone
 
@@ -5061,21 +5171,24 @@ function save-copyDisks {
 			MaxShares					= $maxShares
 			DiskIOPSReadWrite			= $DiskIOPSReadWrite  		#e.g. 1024
 			DiskMBpsReadWrite			= $DiskMBpsReadWrite  		#e.g. 4
+			DiskIOPSReadOnly			= $DiskIOPSReadOnly			# only for shared disks
+			DiskMBpsReadOnly			= $DiskMBpsReadOnly			# only for shared disks
 			LogicalSectorSize			= $logicalSectorSize
 
 			DiskControllerType			= ''						# will be updated below by VM info
 			WriteAcceleratorEnabled		= $False 					# will be updated below by VM info
 			Caching						= 'None'					# will be updated below by VM info
 			SecurityType				= $securityType
-			HyperVGeneration			= $disk.HyperVGeneration -as [string]
+			HyperVGeneration			= convertTo-String $disk.HyperVGeneration
+			SupportsHibernation			= convertTo-Boolean -nullAsFalse $disk.SupportsHibernation
 
-			DiskCreationMethod			= $Null
-			BlobCopy					= $blobCopy
-			SnapshotCopy				= $snapshotCopy
-			RestApiNeeded				= $false
-			IncrementalSnapshots		= $incrementalSnapshots
+			DiskCreationMethod			= $null		# set in function get-diskCreationMethod
+			BlobCopy					= $false	# set in function get-diskCreationMethod
+			SnapshotCopy				= $false	# set in function get-diskCreationMethod
+			IncrementalSnapshots		= $false	# set in function get-diskCreationMethod
 			SnapshotName				= $snapshotName
 			SnapshotId					= "/subscriptions/$sourceSubID/resourceGroups/$sourceRG/providers/Microsoft.Compute/snapshots/$snapshotName"
+			RestApiNeeded				= $false	# set in function set-restApiNeeded
 
 			AccessSAS 					= ''		# access token for source snapshot
 			SecurityDataAccessSAS 		= ''		# access token for source snapshot
@@ -5083,13 +5196,19 @@ function save-copyDisks {
 			DelegationToken 			= ''		# access token for target BLOB
 			TokenRestAPI				= $Null
 
-			ManagedBy					= $ManagedBy	# names of VMs
-			OsType      				= $osType
+			NetworkAccessPolicy			= $NetworkAccessPolicy # resource config (target disk)
+			PublicNetworkAccess			= $PublicNetworkAccess # resource config (target disk)
+			DataAccessAuthMode			= $DataAccessAuthMode  # resource config (target disk)
+			PublicAccessDenied			= $PublicAccessDenied	# display setting (source disk)
+			AuthRequired				= $AuthRequired			# display setting (source disk)
 
-			SwapName					= $Null
-			SnapshotSwap				= $False
-			DiskSwapOld					= $False
-			DiskSwapNew					= $False
+			ManagedBy					= $ManagedBy	# names of VMs
+			OsType      				= convertTo-String $disk.OsType 
+
+			SwapName					= $Null		# set in set-paramSwapSnapshot4disk / set-paramSwapDisk4disk
+			SnapshotSwap				= $False	# set in function set-paramSwapSnapshot4disk
+			DiskSwapOld					= $False	# set in function set-paramSwapDisk4disk
+			DiskSwapNew					= $False	# set in function set-paramSwapDisk4disk
 
 			image						= $False 	# will be updated below by VM info
 			VmRestrictions				= $False	# will be updated later
@@ -5331,10 +5450,136 @@ function test-disksTargetRG {
 #--------------------------------------------------------------
 function get-diskCreationMethod {
 #--------------------------------------------------------------
+	$script:cannotCopyLargeDisk 		= $false
+	$script:cannotCopyConfDisk 			= $false
+	$script:cannotCopyDifferentTenant 	= $false
+	$script:cannotCopySecuredDisk 		= $false
+
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
 	| ForEach-Object {
 
+		#--------------------------------------------------------------
+		# copy mode: default
+
+		# same region: no remote copy
+		$_.BlobCopy 			= $false
+		$_.SnapshotCopy 		= $false
+
+		# blob copy explicitly requested
+		if ($script:useBlobCopy) {
+			$_.BlobCopy 		= $true
+		}
+
+		# snapshot copy explicitly requested
+		elseif ($script:useSnapshotCopy) {
+			$_.SnapshotCopy 	= $true
+		}
+
+		# snapshot copy is default for copying into different region
+		elseif ($script:sourceLocation -ne $script:targetLocation) {
+			$_.SnapshotCopy 	= $true
+		}
+
+		#--------------------------------------------------------------
+		# copy mode: change to blob copy
+
+		# different user or tenant
+		if ($script:differentTenantOrUser) {
+			$_.BlobCopy 		= $true
+			$_.SnapshotCopy 	= $false
+		}
+
+		# parameter useAzCopy overrides default for $blobCopy/$snapshotCopy
+		if ($_.SnapshotCopy -and $script:useAzCopy) {
+			$_.BlobCopy 		= $true
+			$_.SnapshotCopy 	= $false
+		}
+
+		# confidential VM (BadRequest ErrorMessage: Incremental snapshot support is not available for confidential vm)	
+		if ($_.SnapshotCopy -and ($_.SecurityType -like 'ConfidentialVM*')) {
+			$_.BlobCopy 		= $true		# OS disk with 4TB+ not possible
+			$_.SnapshotCopy 	= $false
+			write-logFileWarning "Cannot use SNAPSHOT copy for confidential VMs -> BLOB copy"
+		}
+
+		#--------------------------------------------------------------
+		# copy mode: change to snapshot copy
+
+		# BLOB copy does not work for BLOBs larger than 4TiB using Start-AzStorageBlobCopy
+		if ($_.BlobCopy) {
+			if ($_.SizeGB -gt 4096) {
+				# blob copy not possible
+ 
+				if ($script:differentTenantOrUser) {
+					# snapshot copy not possible
+					# ERROR in function test-controlPlane (after skipDisks has been checked)
+					$script:cannotCopyLargeDisk = $true
+				}
+				else {
+					write-logFileWarning "Cannot use BLOB copy for disks larger than 4TiB -> SNAPSHOT copy"
+					$_.BlobCopy 		= $false
+					$_.SnapshotCopy 	= $true
+				}
+			}
+		}
+
+		# BLOB copy requires parameter allowPublicNwAccessForSnapshots when disk access is additionally secured
+		if ($_.BlobCopy) {
+			if ($_.PublicAccessDenied -or $_.AuthRequired) {
+				if (!$script:allowPublicNwAccessForSnapshots) {
+					# blob copy not allowed (but set)
+
+					if ($script:differentTenantOrUser) {
+						# snapshot copy not possible
+						# ERROR in function test-controlPlane (after skipDisks has been checked)
+						$script:cannotCopyDifferentTenant = $true
+					}
+
+					if ($_.SecurityType -like 'ConfidentialVM*') {
+						# snapshot copy not possible
+						# ERROR in function test-controlPlane (after skipDisks has been checked)
+						$script:cannotCopyConfDisk = $true
+					}
+
+					if (!$script:useSnapshotCopy4ProtectedSnapshots) {	
+						# snapshot copy not configured				
+						# ERROR in function test-controlPlane (after skipDisks has been checked)
+						$script:cannotCopySecuredDisk = $true
+					}
+					else {
+						$_.BlobCopy 		= $false
+						$_.SnapshotCopy 	= $true
+					}
+				}
+			}
+		}
+
+		#--------------------------------------------------------------
+		# snapshot mode
+		if (($script:useIncSnapshots -and ($_.SecurityType -notlike 'ConfidentialVM*')) `
+		-or $_.SnapshotCopy `
+		-or ($_.SkuName -in @('UltraSSD_LRS', 'PremiumV2_LRS'))) { `
+
+			$_.IncrementalSnapshots	= $True
+		}
+		else {
+			$_.IncrementalSnapshots	= $False
+		}
+
+		#--------------------------------------------------------------
+		# using createDisksManually
+		if ($_.SecurityType -like 'ConfidentialVM*' ) {
+			if ($_.BlobCopy -or $_.SnapshotCopy) {
+				if (!$script:createDisksManually) {
+					write-logFileWarning "Creating disks separately outside BICEP template for Confidential VMs"
+					write-logFile
+					$script:createDisksManually = $true
+				}
+			}
+		}
+
+		#--------------------------------------------------------------
 		# snapshot copy needed?
 		if ($_.SnapshotCopy) {
 			$script:snapshotCopyNeeded = $True
@@ -5342,16 +5587,11 @@ function get-diskCreationMethod {
 
 		# BLOB copy needed?
 		if ($_.BlobCopy) {
-			$script:blobCopyNeeded = $True
+			$script:blobCopyNeeded = $True	
 		}
-	}
 
-	# save disk creation method
-	$script:copyDisks.Values
-	| Where-Object Skip -ne $True
-	| ForEach-Object {
-
-		# snapshot method
+		#--------------------------------------------------------------
+		# get text for diskCreationMethod
 		if ($_.SnapshotSwap) {
 			$diskCreationMethod = 'SNAP (swap)'
 		}
@@ -5368,10 +5608,9 @@ function get-diskCreationMethod {
 			}
 		}
 
-
 		# copy method
 		if ($_.BlobCopy) {
-			if ($useAzCopy) {
+			if ($script:useAzCopy) {
 				$diskCreationMethod += ' -> BLOB (AzCopy)'
 			}
 			else {
@@ -5383,25 +5622,18 @@ function get-diskCreationMethod {
 			$diskCreationMethod += ' -> SNAP COPY'
 		}
 
-
 		# disk creation method
 		if ($script:createDisksManually) {
-			if ($_.RestApiNeeded) {
-				$diskCreationMethod += ' -> DISK (REST-API)'
-			}
-			else {
-				$diskCreationMethod += ' -> DISK'
-			}
+			$diskCreationMethod += ' -> DISK'
 		}
-
 		else {
 			$diskCreationMethod += ' -> BICEP'
 		}
 
+		# special case: skipDiskCreation
 		if ($skipDiskCreation) {
 			$diskCreationMethod = 'use existing disk'
 		}
-
 
 		# resulting method as string
 		$_.DiskCreationMethod = $diskCreationMethod
@@ -5843,6 +6075,7 @@ function set-paramSwapDisk4disk {
 		$script:copyDisks[$oldDisk].DiskIOPSReadWrite		= $script:copyDisks[$newDisk].DiskIOPSReadWrite
 		$script:copyDisks[$oldDisk].DiskMBpsReadWrite		= $script:copyDisks[$newDisk].DiskMBpsReadWrite
 		$script:copyDisks[$oldDisk].BurstingEnabled			= $script:copyDisks[$newDisk].BurstingEnabled
+		$script:copyDisks[$oldDisk].HibernationEnabled		= $script:copyDisks[$newDisk].HibernationEnabled
 		$script:copyDisks[$oldDisk].SizeGB					= $script:copyDisks[$newDisk].SizeGB
 		$script:copyDisks[$oldDisk].SizeTierName			= $script:copyDisks[$newDisk].SizeTierName
 		$script:copyDisks[$oldDisk].SizeTierGB				= $script:copyDisks[$newDisk].SizeTierGB
@@ -6257,24 +6490,32 @@ function get-paramSkipDisks {
 	#--------------------------------------------------------------
 	# skip disks when parameter is set
 	foreach ($diskName in $skipDisks) {
+
+		# disk not found
 		if ($Null -eq $script:copyDisks[$diskName]) {
 			write-logFileWarning "Invalid parameter 'skipDisks'" `
 								"Disk '$diskName' not found" `
 								-stopCondition $True # stop when not simulate
 			continue
 		}
+
+		# disk is OS disk
 		if ($Null -ne $script:copyDisks[$diskName].OsType) {
 			write-logFileWarning "Invalid parameter 'skipDisks'" `
 								"Disk '$diskName' is an OS disk" `
 								-stopCondition $True # stop when not simulate
 			continue
 		}
-		$script:copyDisks[$diskName].Skip = $True
 
-		# update number of data disks
-		foreach ($vmName in $script:copyDisks[$diskName].ManagedBy) {
-			if ($null -ne $script:copyVMs[$vmName]) {
-				$script:copyVMs[$vmName].NewDataDiskCount--
+		# for justCreateSnapshots: do not skip disks
+		if (!$justCreateSnapshots) {
+			$script:copyDisks[$diskName].Skip = $True
+	
+			# update number of data disks
+			foreach ($vmName in $script:copyDisks[$diskName].ManagedBy) {
+				if ($null -ne $script:copyVMs[$vmName]) {
+					$script:copyVMs[$vmName].NewDataDiskCount--
+				}
 			}
 		}
 	}
@@ -6289,7 +6530,10 @@ function get-paramSkipDisks {
 			$detachedDisks += $_.Name
 
 			if (!$copyDetachedDisks) {
-				$_.Skip = $True
+				# for justCreateSnapshots: do not skip disks
+				if (!$justCreateSnapshots) {
+					$_.Skip = $True
+				}
 			}
 		}
 	}
@@ -6789,13 +7033,13 @@ function get-paramSetDiskSku {
 	| Sort-Object Name
 	| ForEach-Object {
 
-		$_.SkuNameOld = $_.SkuName
+		$_.SkuNameOld = $_.SkuName 		# needed for RGCOPY update mode
 
 		$diskName	= $_.Name
 		$vmName		= $_.ManagedBy[0]
+
 		$current	= $_.SkuName
 		$wanted		= $_.SkuNameNew
-		
 		if ($Null -eq $wanted) {
 			$wanted = $current
 		}
@@ -6806,6 +7050,7 @@ function get-paramSetDiskSku {
 			if ($current -notin @('StandardSSD_LRS', 'Standard_LRS')) { 	# -> not use default value
 				# get old value
 				$wanted = $current
+				$_.SkuNameNew = $null
 			}
 		}
 
@@ -6841,11 +7086,13 @@ function get-paramSetDiskSku {
 
 			# check if VM supports UltraSSD_LRS
 			if ($wanted -eq 'UltraSSD_LRS') {
-				if ($script:copyVMs[$vmName].UltraSSDAllowed -eq $False) {
+				if ($vmName.length -ne 0) {
+					if ($script:copyVMs[$vmName].UltraSSDAllowed -eq $False) {
 
-					write-logFileWarning "Disk SKU '$wanted' of disk '$diskName' cannot be used for VM size '$vmSize'" `
-										-stopCondition $True # stop when not simulate
-				}					
+						write-logFileWarning "Disk SKU '$wanted' of disk '$diskName' cannot be used for VM size '$vmSize'" `
+											-stopCondition $True # stop when not simulate
+					}
+				}
 			}
 
 			# check if VM supports premiumIO 
@@ -6926,20 +7173,11 @@ function get-paramSetDiskSize {
 	get-parameterRule
 	while ($Null -ne $script:paramConfig) {
 
-		$diskSize_min = 4
-		$diskSize_max = 32 * 1024 - 1
-		$sizeGB = $script:paramConfig -as [int]
-		if (($sizeGB -lt $diskSize_min) -or ($sizeGB -gt $diskSize_max)) {
-			write-logFileError "Invalid parameter '$script:paramName'" `
-								"sizeGB: '$sizeGB'" `
-								"sizeGB must be between $diskSize_min and $diskSize_max"
-		}
-
 		$script:copyDisks.values
 		| Where-Object {$_.Name -in $script:paramDisks}
 		| ForEach-Object {
 
-			$_.sizeGBNew = $sizeGB
+			$_.sizeGBNew = $script:paramConfig -as [int]
 		}
 		get-parameterRule
 	}
@@ -6951,13 +7189,49 @@ function get-paramSetDiskSize {
 	| ForEach-Object {
 
 		$_.SizeGBOld = $_.SizeGB
+		if ($Null -eq $_.SizeGBNew) {
+			$_.SizeGBNew = $_.SizeGBOld
+		}
 
-		if (($Null -ne $_.SizeGBNew) -and ($_.SizeGB -gt $_.SizeGBNew)) {
+		# get min and max size
+		if ($_.SkuName -like 'UltraSSD_*') {
+			$diskSize_min = 4
+			$diskSize_max = 65536
+		}
+		elseif ($_.SkuName -like 'PremiumV2_*') {
+			$diskSize_min = 1
+			$diskSize_max = 65536
+		}
+		elseif (($_.SkuName -like 'StandardSSD_*') -or ($_.SkuName -like 'Premium_*')) {
+			$diskSize_min = 4
+			$diskSize_max = 32 * 1024 - 1
+		}
+		else {
+			# 'Standard_LRS'
+			$diskSize_min = 32
+			$diskSize_max = 32 * 1024 - 1
+		}
+
+		# minimum disk size required
+		if ($_.SizeGBNew -lt $diskSize_min) {
+			$_.SizeGBNew = $diskSize_min
+			write-logFileWarning "Increasing disk size to minimum $diskSize_min GB for SKU $($_.SkuName)"
+		}
+
+		# check if greater than max size
+		if ($_.SizeGBNew -gt $diskSize_max) {
+			write-logFileError "Size of $($_.SizeGBNew) GB not allowed for SKU $($_.SkuName)"
+		}
+
+		# cannot decrease disk size
+		if ($_.SizeGBOld -gt $_.SizeGBNew) {
 			write-logFileError "Invalid parameter 'setDiskSize'" `
-								"New size: $($_.SizeGBNew) GiB, current size: $($_.SizeGB) GiB" `
+								"New size: $($_.SizeGBNew) GiB, current size: $($_.SizeGBOld) GiB" `
 								"Cannot decrease disk size of disk '$($_.Name)'"
 		}
-		elseif (($Null -ne $_.SizeGBNew) -and ($_.SizeGB -ne $_.SizeGBNew)) {
+
+		# calculate tier for new size
+		elseif ($_.SizeGB -ne $_.SizeGBNew) {
 			$_.SizeGB		= $_.SizeGBNew
 			$_.SizeTierName	= get-diskTier $_.SizeGB $_.SkuName
 			$_.SizeTierGB	= get-diskSize $_.SizeTierName
@@ -7035,7 +7309,10 @@ function get-paramSetDiskMaxShares {
 		}
 
 		# check disk SKU
-		if (($_.SkuName -notlike 'Premium_?RS') -and ($_.SkuName -notlike '*SSD*') -and ($wanted -gt 1)) {
+		if ( ($_.SkuName -notlike 'Premium*') `
+		-and ($_.SkuName -notlike 'Ultra*') `
+		-and ($_.SkuName -notlike '*SSD*') `
+		-and ($wanted -gt 1) ) {
 			write-logFileWarning "Shared disks are not supported for SKU '$($_.SkuName)'" `
 								-stopWhenForceVmChecks
 			$wanted = 1
@@ -7249,6 +7526,161 @@ function get-paramSetDiskBursting {
 }
 
 #--------------------------------------------------------------
+function get-paramSetDiskSupportsHibernation {
+#--------------------------------------------------------------
+	# process RGCOPY parameter
+	set-parameter 'setDiskSupportsHibernation' $setDiskSupportsHibernation
+	get-parameterRule
+	while ($Null -ne $script:paramConfig) {
+
+		test-values 'setDiskSupportsHibernation' $script:paramConfig @('True','False') 'hibernation'
+		$myConfig = $script:paramConfig -eq 'True'
+
+		$script:copyDisks.values
+		| Where-Object {$_.Name -in $script:paramDisks}
+		| ForEach-Object {
+
+			$_.SupportsHibernationNew = $myConfig
+		}
+		get-parameterRule
+	}
+
+	# output of changes
+	$script:copyDisks.values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		$current = $_.SupportsHibernation
+		$wanted  = $_.SupportsHibernationNew
+		if ($Null -eq $wanted) {
+			$wanted = $current
+		}
+
+		# update
+		if ($current -ne $wanted) {
+			$_.SupportsHibernation = $wanted
+			$action = 'set'
+		}
+		else {
+			$action = 'keep'
+		}
+
+		# output
+		write-logFileUpdates 'disks' $_.Name "$action supports hibernation" $_.SupportsHibernation -defaultValue
+	}
+}
+
+#--------------------------------------------------------------
+function get-paramSetDiskIOpsReadOnly {
+#--------------------------------------------------------------
+	# process RGCOPY parameter
+	set-parameter 'setDiskIOpsReadOnly' $setDiskIOpsReadOnly
+	get-parameterRule
+	while ($Null -ne $script:paramConfig) {
+
+		$script:copyDisks.values
+		| Where-Object skip -ne $true
+		| Where-Object {$_.Name -in $script:paramDisks}
+		| ForEach-Object {
+
+			$_.DiskIOPSReadOnlyNew = $script:paramConfig1 -as [int]
+		}
+		get-parameterRule
+	}
+
+	# output of changes
+	$script:copyDisks.values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		# DiskIOPSReadOnly not allowed
+		if (($_.MaxShares -lt 2) `
+		-or ($_.SkuName -notin @('UltraSSD_LRS', 'PremiumV2_LRS'))) {
+			$_.DiskIOPSReadOnly = 0
+		}
+
+		# set DiskIOPSReadOnly was explicitly configured
+		elseif ($null -ne $_.DiskIOPSReadOnlyNew) {
+			$_.DiskIOPSReadOnly = $_.DiskIOPSReadOnlyNew
+			write-logFileUpdates 'disks' $_.Name "set DiskIOPSReadOnly" $_.DiskIOPSReadOnly
+		}
+
+		# keep old value when MaxShares and DiskSku has not been changed (sizeGB cannot be decreased)
+		elseif ( ($_.DiskIOPSReadOnly -gt 0) `
+		-and (($_.MaxShares -eq $_.MaxSharesNew) -or ($null -eq $_.MaxSharesNew)) `
+		-and (($_.SkuName   -eq $_.SkuNameNew)   -or ($null -eq $_.SkuNameNew)) ) {
+		
+			write-logFileUpdates 'disks' $_.Name "keep DiskIOPSReadOnly" $_.DiskIOPSReadOnly
+		}
+
+		# set minimun value
+		else {
+			$_.DiskIOPSReadOnly = 100
+			write-logFileUpdates 'disks' $_.Name "set DiskIOPSReadOnly to minimum" $_.DiskIOPSReadOnly
+		}
+	}
+}
+
+#--------------------------------------------------------------
+function get-paramSetDiskMBpsReadOnly {
+#--------------------------------------------------------------
+	# process RGCOPY parameter
+	set-parameter 'setDiskMBpsReadOnly' $setDiskMBpsReadOnly
+	get-parameterRule
+	while ($Null -ne $script:paramConfig) {
+
+		$script:copyDisks.values
+		| Where-Object skip -ne $true
+		| Where-Object {$_.Name -in $script:paramDisks}
+		| ForEach-Object {
+
+			$_.DiskMBpsReadOnlyNew = $script:paramConfig1 -as [int]
+		}
+		get-parameterRule
+	}
+
+	# output of changes
+	$script:copyDisks.values
+	| Where-Object Skip -ne $True
+	| Sort-Object Name
+	| ForEach-Object {
+
+		# DiskMBpsReadOnly not allowed
+		if (($_.MaxShares -lt 2) `
+		-or ($_.SkuName -notin @('UltraSSD_LRS', 'PremiumV2_LRS'))) {
+			$_.DiskMBpsReadOnly = 0
+		}
+
+		# set DiskMBpsReadOnly was explicitly configured
+		elseif ($null -ne $_.DiskMBpsReadOnlyNew) {
+			$_.DiskMBpsReadOnly = $_.DiskMBpsReadOnlyNew
+			write-logFileUpdates 'disks' $_.Name "set DiskMBpsReadOnly" $_.DiskMBpsReadOnly
+		}
+
+		# keep old value when MaxShares and DiskSku has not been changed (sizeGB cannot be decreased)
+		elseif ( ($_.DiskMBpsReadOnly -gt 0) `
+		-and (($_.MaxShares -eq $_.MaxSharesNew) -or ($null -eq $_.MaxSharesNew)) `
+		-and (($_.SkuName   -eq $_.SkuNameNew)   -or ($null -eq $_.SkuNameNew)) ) {
+
+			write-logFileUpdates 'disks' $_.Name "keep DiskMBpsReadOnly" $_.DiskMBpsReadOnly
+		}
+
+		# set minimun value
+		else {
+			if ($_.SkuName -eq 'UltraSSD_LRS') {
+				$_.DiskMBpsReadOnly = 1
+			}
+			else {
+				$_.DiskMBpsReadOnly = 125
+			}
+			write-logFileUpdates 'disks' $_.Name "set DiskMBpsReadOnly to minimum" $_.DiskMBpsReadOnly
+		}
+	}
+}
+
+#--------------------------------------------------------------
 function get-paramSetDiskIOps {
 #--------------------------------------------------------------
 	# process RGCOPY parameter
@@ -7256,14 +7688,12 @@ function get-paramSetDiskIOps {
 	get-parameterRule
 	while ($Null -ne $script:paramConfig) {
 
-		$DiskIOPSReadWrite = $script:paramConfig1 -as [int]
-
 		$script:copyDisks.values
 		| Where-Object skip -ne $true
 		| Where-Object {$_.Name -in $script:paramDisks}
 		| ForEach-Object {
 
-			$_.DiskIOPSReadWriteNew = $DiskIOPSReadWrite
+			$_.DiskIOPSReadWriteNew = $script:paramConfig1 -as [int]
 		}
 		get-parameterRule
 	}
@@ -7277,14 +7707,12 @@ function get-paramSetDiskMBps {
 	get-parameterRule
 	while ($Null -ne $script:paramConfig) {
 
-		$DiskMBpsReadWrite = $script:paramConfig1 -as [int]
-
 		$script:copyDisks.values
 		| Where-Object skip -ne $true
 		| Where-Object {$_.Name -in $script:paramDisks}
 		| ForEach-Object {
 
-			$_.DiskMBpsReadWriteNew = $DiskMBpsReadWrite
+			$_.DiskMBpsReadWriteNew = $script:paramConfig1 -as [int]
 		}
 		get-parameterRule
 	}
@@ -7413,6 +7841,9 @@ function get-IOPS {
 		# absolute maximum
 		if ($max -gt 80000) {
 			$max = 80000
+		}
+		if ($max -lt $min) {
+			$max = $min
 		}
 	}
 	
@@ -8190,7 +8621,8 @@ function new-snapshots {
 
 	#--------------------------------------------------------------
 	# create script and parameters
-	$scriptParameter = "`$sourceRG = '$sourceRG';"
+	$scriptParameter  = "`$sourceRG = '$sourceRG';"
+	$scriptParameter += "`$allowPublicNwAccessForSnapshots = `$$allowPublicNwAccessForSnapshots;"
 
 	$script = {
 		$startTime = get-date
@@ -8227,12 +8659,21 @@ function new-snapshots {
 
 		#--------------------------------------------------------------
 		try {
-			# create snapshot config
+			# create snapshot config:
+			# Snapshots always allow public network access.
+			# However, you can only create snapshots if either all disks already allow public network access
+			# or parameter allowPublicNwAccessForSnapshots has been explicityly set.
 			$parameter = @{
 				SourceUri		= $_.Id
 				CreateOption	= 'Copy'
 				Location		= $_.Location
 				ErrorAction		= 'Stop'
+			}
+
+			if ($allowPublicNwAccessForSnapshots) {
+				$parameter.PublicNetworkAccess	= 'Enabled'
+				$parameter.NetworkAccessPolicy	= 'AllowAll'
+				$parameter.DataAccessAuthMode	= 'None'
 			}
 
 			if ($_.OsType.length -ne 0) { 
@@ -8707,6 +9148,9 @@ function remove-snapshots {
 				-ErrorAction 'Stop' | Out-Null
 		}
 		catch {
+			# No exception is thrown if the snapshot does NOT exists
+
+			# However, there will be an exception for other errors, e.g. resource group does not exist
 			Write-Output "---> $($error[0] -as [string])"
 			# continue RGCOPY
 		}
@@ -9003,8 +9447,8 @@ function grant-copySnapshots2Blobs {
 		$tokenCreation = "Create temporary token using SA-key for container in target RG"
 	}
 
-	write-stepStart "GRANT ACCESS TO DISK SNAPSHOTS" -parallelism -startMeasurement `
-		-stepDescription "Create temporary access token for disk snapshots in source RG" `
+	write-stepStart "CREATE SAS TOKENS FOR DISK SNAPSHOTS" -parallelism -startMeasurement `
+		-stepDescription "Create temporary access tokens for disk snapshots in source RG" `
 						$tokenCreation
 
 	set-copyDisksAzureToken
@@ -9170,7 +9614,7 @@ function grant-copySnapshots2Blobs {
 	#--------------------------------------------------------------
 	# start script in parallel
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
-	write-logFile "Creating temporary token for snapshot..."
+	write-logFile "Creating temporary SAS tokens for snapshots..."
 
 	$script:copyDisks.Values
 	| Where-Object Skip -ne $True
@@ -9180,7 +9624,7 @@ function grant-copySnapshots2Blobs {
 	| Out-Host
 
 	if (!$?) {
-		write-logFileError "Grant Access to snapshot failed"
+		write-logFileError "Creating SAS tokens for snapshots failed"
 	}
 
 	#--------------------------------------------------------------
@@ -9199,7 +9643,7 @@ function grant-copySnapshots2Blobs {
 #--------------------------------------------------------------
 function revoke-copySnapshots2Blobs {
 #--------------------------------------------------------------
-	write-stepStart "REVOKE ACCESS FROM DISK SNAPSHOTS" -parallelism -startMeasurement `
+	write-stepStart "REVOKE SAS TOKENS OF DISK SNAPSHOTS" -parallelism -startMeasurement `
 		-stepDescription "Revoke access token for disk snapshots in source RG"
 
 	#--------------------------------------------------------------
@@ -9218,7 +9662,7 @@ function revoke-copySnapshots2Blobs {
 			-ErrorAction 'SilentlyContinue' | Out-Null
 		if (!$?) {
 			Write-Output "---> $($error[0] -as [string])"
-			throw "Revoke access from '$SnapshotName' failed"
+			throw "Revoking SAS token from '$SnapshotName' failed"
 		}
 
 		# display single statistics
@@ -9230,7 +9674,7 @@ function revoke-copySnapshots2Blobs {
 	#--------------------------------------------------------------
 	# start script in parallel
 	$param = get-scriptBlockParam $scriptParameter $script $maxDOP
-	Write-logFile "Revoking access from snapshot..."
+	Write-logFile "Revoking SAS tokens from snapshot..."
 
 	try {
 		$script:copyDisks.Values
@@ -9240,11 +9684,11 @@ function revoke-copySnapshots2Blobs {
 		| Tee-Object -FilePath $logPath -append
 		| Out-Host
 		if (!$?) {
-			write-logFileWarning "Revoke access from snapshots failed"
+			write-logFileWarning "Revoking SAS tokens from snapshots failed"
 		}
 	}
 	catch {
-		write-logFileWarning "Revoke access from snapshots failed"
+		write-logFileWarning "Revoking SAS tokens from snapshots failed"
 	}
 
 	#--------------------------------------------------------------
@@ -10538,6 +10982,13 @@ function new-disks {
 
 				if ($_.MaxShares -gt 1) {
 					$body.properties.maxShares = $_.MaxShares
+
+					if ($_.DiskIOPSReadOnly -gt 0) {
+						$body.properties.diskIOPSReadOnly = $_.DiskIOPSReadOnly
+					}
+					if ($_.DiskMBpsReadOnly -gt 0) {
+						$body.properties.diskMBpsReadOnly = $_.DiskMBpsReadOnly
+					}
 				}
 
 				# sector size
@@ -10545,6 +10996,17 @@ function new-disks {
 					if (($Null -eq $_.LogicalSectorSize) -or ($_.LogicalSectorSize -eq 512)) {
 						$body.properties.creationData.logicalSectorSize = 512
 					}
+				}
+
+				# disk access
+				if ($null -ne $_.NetworkAccessPolicy) {
+					$body.properties.networkAccessPolicy	= $_.NetworkAccessPolicy
+				}
+				if ($null -ne $_.PublicNetworkAccess) {
+					$body.properties.publicNetworkAccess	= $_.PublicNetworkAccess
+				}
+				if ($null -ne $_.DataAccessAuthMode) {
+					$body.properties.dataAccessAuthMode		= $_.DataAccessAuthMode
 				}
 
 				# zone
@@ -10667,6 +11129,13 @@ function new-disks {
 		
 				if ($_.MaxShares -gt 1) {
 					$param.MaxSharesCount = $_.MaxShares
+
+					if ($_.DiskIOPSReadOnly -gt 0) {
+						$param.DiskIOPSReadOnly = $_.DiskIOPSReadOnly
+					}
+					if ($_.DiskMBpsReadOnly -gt 0) {
+						$param.DiskMBpsReadOnly = $_.DiskMBpsReadOnly
+					}
 				}
 		
 				if ($_.OsType.Length -ne 0) {
@@ -10682,6 +11151,17 @@ function new-disks {
 					if (($Null -eq $_.LogicalSectorSize) -or ($_.LogicalSectorSize -eq 512)) {
 						$param.LogicalSectorSize = 512
 					}
+				}
+
+				# disk access
+				if ($null -ne $_.NetworkAccessPolicy) {
+					$param.NetworkAccessPolicy	= $_.NetworkAccessPolicy
+				}
+				if ($null -ne $_.PublicNetworkAccess) {
+					$param.PublicNetworkAccess	= $_.PublicNetworkAccess
+				}
+				if ($null -ne $_.DataAccessAuthMode) {
+					$param.DataAccessAuthMode	= $_.DataAccessAuthMode
 				}
 		
 				# zone
@@ -11801,6 +12281,62 @@ function set-diskZone {
 }
 
 #--------------------------------------------------------------
+function test-diskUnsupportedProperties {
+#--------------------------------------------------------------
+	foreach ($az_res in $script:sourceDisks) {
+
+		#========================================
+		$script:testResourceName = $az_res.Name
+		$script:testResourceType = 'disk'
+		#========================================
+
+		if ($script:copyDisks[$testResourceName].Skip) {
+			continue
+		}
+
+		# disk are actually created in new-disks or add-disksNew
+		# $dummy = @{
+		# 	type 		= 'Microsoft.Compute/disks'
+		# 	apiVersion	= '2026-03-02'
+		# }
+
+		# checked in save-copyDisks:S
+		# test-property -alreadyProcessed 'encryption' $az_res.Encryption
+		# test-property -alreadyProcessed 'encryptionSettingsCollection' $az_res.EncryptionSettingsCollection
+		# test-property -alreadyProcessed 'securityProfile' $az_res.SecurityProfile
+
+		# general settings:
+		# test-property -alreadyProcessed 'extendedLocation' $az_res.ExtendedLocation
+		# test-property -alreadyProcessed 'location' $az_res.Location
+		# test-property -alreadyProcessed 'sku' $az_res.Sku
+		# test-property -alreadyProcessed 'tags' $az_res.Tags
+		# test-property -alreadyProcessed 'zones' $az_res.Zones
+
+		# disk properties:
+		test-property 'availabilityPolicy' $az_res.AvailabilityPolicy # Determines how platform treats disk failures
+		# test-property -alreadyProcessed 'burstingEnabled' $az_res.BurstingEnabled
+		test-property 'completionPercent' $az_res.CompletionPercent -displayProperty
+		# test-property -alreadyProcessed 'creationData' $az_res.CreationData
+		# test-property -alreadyProcessed 'dataAccessAuthMode' $az_res.DataAccessAuthMode
+		test-property 'diskAccessId' $az_res.DiskAccessId # DiskAccess resource not supported yet by RGCOPY
+		# test-property -alreadyProcessed 'diskIOPSReadOnly' $az_res.DiskIOPSReadOnly
+		# test-property -alreadyProcessed 'diskIOPSReadWrite' $az_res.DiskIOPSReadWrite
+		# test-property -alreadyProcessed 'diskMBpsReadOnly' $az_res.DiskMBpsReadOnly
+		# test-property -alreadyProcessed 'diskMBpsReadWrite' $az_res.DiskMBpsReadWrite
+		# test-property -alreadyProcessed 'diskSizeGB' $az_res.DiskSizeGB
+		# test-property -alreadyProcessed 'hyperVGeneration' $az_res.HyperVGeneration
+		# test-property -alreadyProcessed 'maxShares' $az_res.MaxShares
+		# test-property -alreadyProcessed 'networkAccessPolicy' $az_res.NetworkAccessPolicy
+		test-property 'optimizedForFrequentAttach' $az_res.OptimizedForFrequentAttach
+		# test-property -alreadyProcessed 'osType' $az_res.OsType
+		# test-property -alreadyProcessed 'publicNetworkAccess' $az_res.PublicNetworkAccess
+		test-property 'purchasePlan' $az_res.PurchasePlan
+		# test-property -alreadyProcessed 'supportsHibernation' $az_res.supportsHibernation
+		# test-property -alreadyProcessed 'supportedCapabilities' $az_res.SupportedCapabilities
+	}
+}
+
+#--------------------------------------------------------------
 function get-sourceVMs {
 #--------------------------------------------------------------
 	# Get source disks
@@ -11835,16 +12371,10 @@ function get-sourceVMs {
 	#--------------------------------------------------------------
 	# save internal structures
 	save-copyDisks				# create $script:copyDisks{}
-								# set $script:copyDisks[$diskName].IncrementalSnapshots
-								# set $script:copyDisks[$diskName].SnapshotCopy
-								# set $script:copyDisks[$diskName].BlobCopy
-
-	save-copyVMs				# create $script:copyVMs{}
-								
+	save-copyVMs				# create $script:copyVMs{}							
 	save-copyNICs				# create $script:copyNICs{}
 								# used in updateMode
 								# re-run save-copyNICs in copyMode to get remote NICs, too
-
 	#--------------------------------------------------------------
 	# get VM parameter
 	get-paramSetVmName			# set $script:copyVMs[$vmName].Rename
@@ -11866,10 +12396,6 @@ function get-sourceVMs {
 								# set $script:copyDisks[$diskName].DiskControllerType
 								# set $script:copyVMs[$vmName].OsDisk.OsType
 								# set $script:copyVMs[$vmName].OsDisk.HyperVGeneration
-	
-	# run after update-disksFromVM:
-	set-restApiNeeded			# set $script:copyDisks[$diskName].RestApiNeeded
-
 	#--------------------------------------------------------------
 	# copy storage accounts
 	get-paramRenameSa 			# set $script:copySA{}
@@ -11911,17 +12437,20 @@ function get-sourceVMs {
 									# set $script:copyDisks[$oldDisk].SnapshotId
 
 	#--------------------------------------------------------------
-	get-vmSkus						# create $script:vmSkus[$vmSize]
-	get-diskCreationMethod			# set $script:copyDisks[$diskName].DiskCreationMethod
+	show-sourceVMs					# show $script:copyVMs, $script:copyDisks
+	get-diskCreationMethod			# set $script:copyDisks[$diskName].IncrementalSnapshots
+	# set $script:copyDisks[$diskName].SnapshotCopy
+									# set $script:copyDisks[$diskName].BlobCopy
+									# set $script:copyDisks[$diskName].DiskCreationMethod
 									# set $script:snapshotCopyNeeded
 									# set $script:blobCopyNeeded
-									
-	show-sourceVMs					# show $script:copyVMs, $script:copyDisks
 	show-diskCreationMethod			# show DiskCreationMethod
 	get-rgcopyTags					# get VM tags and save them in $script:rgcopyTags
-
+	
 	#--------------------------------------------------------------
 	test-controlPlane				# show-azCopyInstructions
+	get-vmSkus						# create $script:vmSkus[$vmSize]
+	set-restApiNeeded				# set $script:copyDisks[$diskName].RestApiNeeded							
 	set-dependentParameter -afterGettingParams
 }
 
@@ -11979,13 +12508,16 @@ function get-param_all {
 	get-paramSetDiskTier				# update $script:copyDisks[$diskName].performanceTierGB
 										# update $script:copyDisks[$diskName].performanceTierName
 
-	get-paramSetDiskBursting			# update $script:copyDisks[$diskName].BurstingEnabled 
+	get-paramSetDiskBursting			# update $script:copyDisks[$diskName].BurstingEnabled
+	get-paramSetDiskSupportsHibernation	# update $script:copyDisks[$diskName].SupportsHibernation
 	get-paramSetDiskMaxShares			# update $script:copyDisks[$diskName].MaxShares
 
 	get-paramSetDiskIOps
 	get-paramSetDiskMBps
 	get-diskMBpsAndIOps					# update $script:copyDisks[$diskName].DiskIOPSReadWrite
 										# update $script:copyDisks[$diskName].DiskMBpsReadWrite
+	get-paramSetDiskIOpsReadOnly
+	get-paramSetDiskMBpsReadOnly
 
 	# 4. host caching
 	get-paramSetDiskCaching				# update $script:copyDisks[$diskName].Caching
@@ -12090,6 +12622,7 @@ function update-resourcesAll {
 	update-vmZone					# update 'Microsoft.Compute/virtualMachines' with zones (and check avset and vmss)
 	set-diskZone					# set disk zone in $script:copyDisks from VM zone
 									# must run after new-availabilitySet (which changes VM zone)
+	test-diskUnsupportedProperties	# show disk properties that are ignored by RGCOPY
 	update-vmSize					# update 'Microsoft.Compute/virtualMachines' with vmSize 
 									# and encryptionAtHost
 	update-vmDisks					# update 'Microsoft.Compute/virtualMachines' with disks, diskControllerType, securityType
@@ -12589,7 +13122,10 @@ function add-disksExisting {
 				diskSizeGB 			= $_.SizeGB
 				creationData		= $creationData
 				tier				= $_.performanceTierName
-				burstingEnabled		= $_.BurstingEnabled 
+				burstingEnabled		= $_.BurstingEnabled
+				publicNetworkAccess	= $_.PublicNetworkAccess	# might be $null -> removed from BICEP template
+				dataAccessAuthMode	= $_.DataAccessAuthMode		# might be $null -> removed from BICEP template
+				networkAccessPolicy	= $_.NetworkAccessPolicy	# might be $null -> removed from BICEP template
 			}
 
 			# add SecurityType when importing from BLOB
@@ -12612,6 +13148,13 @@ function add-disksExisting {
 
 			if ($_.MaxShares -gt 1) {
 				$properties.maxShares = $_.MaxShares
+
+				if ($_.DiskIOPSReadOnly -gt 0) {
+					$properties.diskIOPSReadOnly = $_.DiskIOPSReadOnly
+				}
+				if ($_.DiskMBpsReadOnly -gt 0) {
+					$properties.diskMBpsReadOnly = $_.DiskMBpsReadOnly
+				}
 			}			
 
 			if ($_.OsType.length -gt 0) {
@@ -15481,8 +16024,6 @@ function get-rgcopyTags {
 	if ($cloneOrMergeMode) {
 		return
 	}
-
-	write-taskStart "RGCOPY tags stored in VMs"
 	
 	$script:rgcopyTags = @()
 	$sapMonitorVmsFromTag = @()
@@ -15576,6 +16117,13 @@ function get-rgcopyTags {
 		$script:installExtensionsSapMonitor = $sapMonitorVmsFromTag
 	}
 
+	#--------------------------------------------------------------
+	if ($script:rgcopyTags.count -eq 0) {
+		return
+	}
+
+	write-taskStart "RGCOPY tags stored in VMs"
+
 	# show tags
 	$script:rgcopyTags
 	| Sort-Object vmName, tagName
@@ -15584,10 +16132,7 @@ function get-rgcopyTags {
 	| Out-String -Width $screenWidthLarge
 	| write-logFilePipe
 
-	if ($script:rgcopyTags.count -eq 0) {
-		write-logFile "No RGCOPY tags found"
-	}
-	elseif ($ignoreTags) {
+	if ($ignoreTags) {
 		write-logFileWarning "Tags ignored by RGCOPY"
 	}
 	else {
@@ -19898,7 +20443,8 @@ function test-property {
 		$text,
 		[switch] $unknownProperty,	# property not found in Get-AzXXX
 		[switch] $displayProperty,	# property is not needed for deployment (e.g. current state)
-		[switch] $uselessProperty	# property does not fit for RGCOPY (e.g. VM image)
+		[switch] $ignoredProperty,	# property does not fit for RGCOPY (e.g. VM image)
+		[switch] $alreadyProcessed	# disk property is already processed
 	)
 
 	if ($null -eq $text) {
@@ -19914,7 +20460,7 @@ function test-property {
 	
 	# property is a display only property
 	# value is known, but will not be used by RGCOPY
-	if ($displayProperty -or $unneededProperty) {
+	if ($displayProperty -or $ignoredProperty -or $alreadyProcessed) {
 		return
 	}
 
@@ -20147,11 +20693,11 @@ function add-az_virtualMachines {
 			userData				= convertTo-String $az_res.UserData
 			virtualMachineScaleSet	= get-bicepReference $az_res.VirtualMachineScaleSet.Id
 		}
-		test-property -uselessProperty 'applicationProfile' $az_res.ApplicationProfile
+		test-property -ignoredProperty 'applicationProfile' $az_res.ApplicationProfile
 		test-property 'billingProfile' $az_res.BillingProfile
 		test-property 'capacityReservation' $az_res.CapacityReservation
 		test-property -unknownProperty 'extensionsTimeBudget'
-		test-property -uselessProperty 'hardwareProfile.vmSizeProperties' $az_res.HardwareProfile.VmSizeProperties
+		test-property -ignoredProperty 'hardwareProfile.vmSizeProperties' $az_res.HardwareProfile.VmSizeProperties
 		test-property 'host' $az_res.Host
 		test-property 'hostGroup' $az_res.HostGroup
 		test-property 'networkProfile.networkApiVersion' $az_res.NetworkProfile.NetworkApiVersion
@@ -20192,7 +20738,7 @@ function add-az_virtualMachines {
 
 		add-resourcesALL $resource $az_res
 
-		test-property -uselessProperty 'plan' $az_res.Plan
+		test-property -ignoredProperty 'plan' $az_res.Plan
 
 		# test location
 		$vmLocation = $az_res.Location
@@ -22370,10 +22916,13 @@ function get-paramJustCopyDisks {
 	get-paramSetDiskSku
 	get-paramSetDiskTier
 	get-paramSetDiskBursting
+	get-paramSetDiskSupportsHibernation
 	get-paramSetDiskMaxShares
 	get-paramSetDiskIOps
 	get-paramSetDiskMBps
 	get-diskMBpsAndIOps
+	get-paramSetDiskIOpsReadOnly
+	get-paramSetDiskMBpsReadOnly
 	set-diskZone
 
 	write-logFile
@@ -23066,13 +23615,13 @@ function remove-remoteSnapshots {
 #--------------------------------------------------------------
 function remove-localSnapshots {
 #--------------------------------------------------------------
+	# remove also snapshots from skipped disks during cleanup
 	$snapshotNames = ( $script:copyDisks.Values `
-						| Where-Object { (($_.DiskSwapNew -eq $True) -or (($_.Skip -ne $True) -and ($_.DiskSwapOld -ne $True))) } `
 						| Where-Object SnapshotSwap -ne $True ).SnapshotName
 
 	if ($snapshotNames.count -gt 0) {
 		
-		if ($deleteSnapshots) {
+		if ($deleteSnapshots -or $allowPublicNwAccessForSnapshots) {
 			remove-snapshots $sourceRG $snapshotNames
 		}
 		else {
@@ -23339,7 +23888,7 @@ function grant-saAccessSingle {
 
 		# warning in DevBox
 		if ($isDevBox) {
-			write-logFileWarning "Access from DevBox to SA might fail when granting access by IP address"
+			write-logFileWarning "Access from DevBox to SA might fail when granting access by IP address" -red
 		}
 	}
 }
@@ -25603,8 +26152,6 @@ function show-rgcopyEnvironment {
 
 	#--------------------------------------------------------------
 	# output of sofware versions
-	write-logFile 'RGCOPY environment:' -ForegroundColor 'Green'
-	write-logFileTab 'pwsh Process ID'		$pid								-darkGray
 	write-logFileTab 'PowerShell version'	$psVersionString					-noColor
 	write-logFileTab 'Az cmdlet version'	$azVersion							-noColor
 	write-logFileTab 'Azcopy version'		$azCopyVersion						-darkGray
@@ -25612,6 +26159,7 @@ function show-rgcopyEnvironment {
 	write-logFileTab 'BICEP path'			$bicepPath							-darkGray
 	write-logFileTab 'OS version'			$PSVersionTable.OS					-darkGray
 	write-logFileTab 'Az.NetAppFiles'		$azAnfVersion						-darkGray
+	write-logFileTab 'pwsh Process ID'		$pid								-darkGray
 	test-hashes
 	if ($isAzure) {
 		if ($isDevBox) {
@@ -25936,7 +26484,7 @@ function get-rgcopySteps {
 	if ($stopVMsTargetRG) {
 		$doStopVMsTargetRG = '[X]'
 	}
-	if ($deleteSnapshots) {
+	if ($deleteSnapshots -or $allowPublicNwAccessForSnapshots) {
 		$doDeleteSnapshots = '[X]'
 	}
 	if ($estimateFileCopy -and $deleteBackups) {
@@ -26074,7 +26622,7 @@ try {
 	write-logFile
 
 	#--------------------------------------------------------------
-	write-stepStart "GET ENVIRONMENT" -startMeasurement
+	write-stepStart "GET INSTALLED SOFTWARE" -startMeasurement
 	#--------------------------------------------------------------
 	test-isAzureDevBoxRdp
 
@@ -26121,23 +26669,25 @@ try {
 	}
 
 	#--------------------------------------------------------------
-	write-stepStart "GET SUBSCRIPTION CONTEXTS" -startMeasurement
+	write-stepStart "GET SUBSCRIPTION CONTEXT" -startMeasurement
 	#--------------------------------------------------------------
-
 	# save $sourceContext / $targetContext / $controlPlaneContext
 	get-allContexts
 
 	# show source/target subscription, user, tenant, ...
 	show-subscriptions
+	
+	write-stepEnd -endMeasurement
 
+	#--------------------------------------------------------------
+	write-stepStart "TEST RGCOPY PARAMETER"
+	#--------------------------------------------------------------
 	set-context $sourceSub # *** CHANGE SUBSCRIPTION **************
-
 	test-parameter
 
 	# display needed steps
 	get-rgcopySteps
-
-	write-stepEnd -endMeasurement
+	write-stepEnd
 
 	#--------------------------------------------------------------
 	# special modes
@@ -26280,6 +26830,7 @@ try {
 
 	if ($useJustCopyDisks) {
 		new-disks
+		remove-localSnapshots
 		exit-rgcopy 0
 	}
 

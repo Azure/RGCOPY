@@ -1,4 +1,13 @@
 ## Version history
+#### RGCOPY 0.9.78 October 2026
+type|change
+:---|:---
+feature|New parameters `diskPublicNetworkAccess`, `diskDataAccessAuthMode`, `diskNetworkAccessPolicy`
+feature|New parameters `allowPublicNwAccessForSnapshots`, `useSnapshotCopy4ProtectedSnapshots`
+feature|New parameter `setDiskSupportsHibernation`
+feature|New parameters `setDiskIOpsReadOnly`, `setDiskMBpsReadOnly`
+bug fix|Allow copying very small disks (size 5GB or less).
+
 #### RGCOPY 0.9.77 September 2026
 type|change
 :---|:---

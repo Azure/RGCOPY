@@ -4,7 +4,7 @@ RGCOPY (**R**esource **G**roup **COPY**) is a tool that copies resources of an A
 
 RGCOPY has been developed for copying and testing SAP systems in Azure. Therefore, it [supports](./rgcopy-docu.md#Supported-Azure-Resources) the most important Azure resources needed for SAP, for example **VMs**, **disks**, **load balancers**, storage accounts including the content of **containers**, **SMB** and **NFS shares**.
 
- >:memo: **Note:** Recent versions of *RGCOPY* can create parallel running *AzCopy* jobs for copying disks to another region (by using parameter `useAzCopy`). This is the [fastest possible way for cross-region disk copy]( https://techcommunity.microsoft.com/blog/sapapplications/accelerating-cross-region-azure-disk-copying/4539245).
+ >:memo: **Note:** Recent versions of *RGCOPY* can create parallel running *AzCopy* jobs for copying disks to another region (by using parameter `useAzCopy`). This is the [fastest possible way for cross-region disk copy](./rgcopy-docu.md#Disk-Creation-using-Blob-Copy-with-AzCopy).
  If you just want to copy disks you could use AzCopy without RGCOPY. However, this would be much more complicated because you would have to create network rules, user delegation tokens and SAS tokens on your own. RGCOPY handles these tasks for you and coordinates concurrent jobs. In addition, RGCOPY takes care of special cases, such as OS disks of confidential VMs that require three blob copies per disk instead of a single one.
  
 RGCOPY is a PowerShell script that uses cached credentials. Before starting RGCOPY, you must run the PowerShell cmdlet `Connect-AzAccount` to create the credentials. For example:
@@ -52,7 +52,7 @@ RGCOPY has different operation modes. By default, RGCOPY is running in Copy Mode
 - In **[Merge Mode](./rgcopy-docu.md#Merge-Mode)**, a VM is merged into a different resource group. This can be used for copying a jump box to a different resource group.
 
 
->:memo: **Copying or moving an (SAP) system to a different region**
+>:memo: **Note:** **Copying or moving an (SAP) system to a different region**
 >
  >RGCOPY has been originally developed to copy an SAP system within a single resource group for Microsoft internal testing. RGCOPY did not copy ***all*** resource types in this resource group and did it not copy ***all*** properties of these resources.
 >
